@@ -88,6 +88,16 @@ pub fn mkdir(path: [*:0]const u8) isize {
     return @bitCast(syscall1(83, @intFromPtr(path)));
 }
 
+/// pipe(fds): create a read/write fd pair. fds[0]=read, fds[1]=write.
+pub fn pipe(fds: *[2]u32) isize {
+    return @bitCast(syscall1(22, @intFromPtr(fds)));
+}
+
+/// dup2(oldfd, newfd): duplicate oldfd to newfd, closing newfd first.
+pub fn dup2(oldfd: usize, newfd: usize) isize {
+    return @bitCast(syscall3(33, oldfd, newfd, 0));
+}
+
 /// A null-terminated C string as a Zig slice.
 pub fn span(p: [*:0]const u8) []const u8 {
     var len: usize = 0;

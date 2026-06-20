@@ -26,6 +26,8 @@ const SYS_execve: usize = 59;
 const SYS_exit: usize = 60;
 const SYS_wait4: usize = 61;
 const SYS_mkdir: usize = 83;
+const SYS_pipe: usize = 22;
+const SYS_dup2: usize = 33;
 const SYS_getdents64: usize = 217;
 const SYS_spawn: usize = 1000;
 
@@ -120,8 +122,49 @@ fn sysOpen(path_ptr: usize, flags: usize) isize {
 fn sysClose(fd: usize) isize {
     const fds = fdTable();
     if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
-    if (fd > 2) fds[fd].used = false; // keep stdio open
+    if (fd > 2) {
+        const f = &fds[fd];
+        // Decrement the write-end reference count so readers see EOF when all
+        // write ends are closed.
+        if (f.is_write_pipe) {
+            if (f.node.pipe) |p| {
+                if (p.writers > 0) p.writers -= 1;
+            }
+        }
+        f.used = false;
+    }
     return 0;
+}
+
+fn sysPipe(fds_ptr: usize) isize {
+    const ends = vfs.mkpipe() catch return -ENOMEM;
+    const fds = fdTable();
+    const rfd = allocFd() orelse return -EBADF;
+    fds[rfd] = .{ .node = ends[0], .used = true };
+    const wfd = allocFd() orelse { fds[rfd].used = false; return -EBADF; };
+    fds[wfd] = .{ .node = ends[1], .used = true, .is_write_pipe = true };
+    const out: *[2]u32 = @ptrFromInt(fds_ptr);
+    out[0] = @intCast(rfd);
+    out[1] = @intCast(wfd);
+    return 0;
+}
+
+fn sysDup2(old_fd: usize, new_fd: usize) isize {
+    const fds = fdTable();
+    if (old_fd >= process.MAX_FD or !fds[old_fd].used) return -EBADF;
+    if (new_fd >= process.MAX_FD) return -EBADF;
+    // Close new_fd if open.
+    if (fds[new_fd].used and new_fd != old_fd) {
+        if (fds[new_fd].is_write_pipe) {
+            if (fds[new_fd].node.pipe) |p| { if (p.writers > 0) p.writers -= 1; }
+        }
+    }
+    fds[new_fd] = fds[old_fd];
+    // If we just duplicated a write-end of a pipe, bump the writers count.
+    if (fds[new_fd].is_write_pipe) {
+        if (fds[new_fd].node.pipe) |p| p.writers += 1;
+    }
+    return @intCast(new_fd);
 }
 
 fn sysLseek(fd: usize, offset: usize, whence: usize) isize {
@@ -175,7 +218,7 @@ fn sysGetdents64(fd: usize, buf_ptr: usize, count: usize) isize {
         base[18] = switch (child.kind) {
             .dir => DT_DIR,
             .chardev => DT_CHR,
-            .file => DT_REG,
+            .file, .pipe => DT_REG,
         };
         @memcpy(base[19 .. 19 + name.len], name);
 
@@ -259,6 +302,8 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_exit => process.exit(@bitCast(@as(u32, @truncate(a1)))),
         SYS_wait4 => process.wait4(@bitCast(a1), a2, a3),
         SYS_mkdir => sysMkdir(a1),
+        SYS_pipe => sysPipe(a1),
+        SYS_dup2 => sysDup2(a1, a2),
         SYS_getdents64 => sysGetdents64(a1, a2, a3),
         SYS_spawn => sysSpawn(a1, a2),
         else => -ENOSYS,

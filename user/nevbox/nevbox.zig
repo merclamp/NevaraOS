@@ -90,6 +90,16 @@ fn appletMkdir() void {
 }
 
 fn appletCat() void {
+    if (nstd.argc() <= 1) {
+        // No arguments: copy stdin to stdout.
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const n = nstd.read(0, &buf);
+            if (n == 0) break;
+            _ = nstd.write(1, buf[0..n]);
+        }
+        return;
+    }
     var i: usize = 1;
     while (nstd.argZ(i)) |path| : (i += 1) {
         const fd = nstd.open(path, 0);

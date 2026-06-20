@@ -47,14 +47,15 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 - Runs real ring-3 programs from a built-in ELF loader, including an init
   system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
   C library (**ZLibc**) — all written in Zig, no external libc.
-- An interactive shell (**nsh**) fed by a PS/2 keyboard through `/dev/console`,
-  launching BusyBox-style applets (`echo`, `cat`, `ls`) on demand.
+- An interactive shell (**nsh**) with pipelines (`cmd1 | cmd2`), I/O redirection
+  (`> file`, `>> file`, `< file`), and background jobs (`cmd &`).
+
 - Reads and writes a real disk: **FAT16** at `/mnt` (subdirectories, mkfile,
   mkdir) interoperable with fsck.fat / mtools; **ext4** at `/ext` (read-only).
 
 ## Current status
 
-Nine foundational stages are done and verified in QEMU:
+Ten foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -86,13 +87,15 @@ Nine foundational stages are done and verified in QEMU:
   host-interoperable with `fsck.fat` / mtools. **ext4** mounts read-only at
   `/ext`: extent-based files, linear directories, and subdirectories — produced
   by `mke2fs` on the host, read transparently by the kernel.
-
+- ✅ **Pipes & I/O redirection** — anonymous pipes with correct reference
+  counting (`pipe`/`dup2`/close-on-exec); **nsh** parses `|`, `>`, `>>`, `<`
+  and runs multi-stage pipelines: `echo hi | cat`, `ls | cat | cat`,
+  `cat < file`, `echo text > file`.
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Pipes & redirection** — `cat /mnt/x > /mnt/y`, `cmd1 | cmd2` in nsh.
-- ⏳ **More userland** — more NevBox applets, a richer ZLibc.
+- ⏳ **More userland** — more NevBox applets (wc, grep, head), a richer ZLibc.
 - ⏳ **Polish** — networking, a native filesystem, users & permissions, a
   package manager, and more.
 

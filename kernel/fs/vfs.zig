@@ -23,7 +23,34 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const Kind = enum { file, dir, chardev };
+pub const Kind = enum { file, dir, chardev, pipe };
+
+/// Anonymous pipe: a fixed-size ring buffer in kernel memory.
+/// `writers` counts how many fd slots currently hold the write end. When it
+/// drops to zero the read side sees EOF (returns 0).
+pub const Pipe = struct {
+    const CAP = 4096;
+    buf: [CAP]u8 = undefined,
+    head: usize = 0,   // write pos
+    tail: usize = 0,   // read pos
+    writers: u32 = 1,
+
+    pub fn avail(self: *const Pipe) usize {
+        return (self.head -% self.tail) % CAP;
+    }
+    pub fn free(self: *const Pipe) usize {
+        return CAP - 1 - self.avail();
+    }
+    pub fn push(self: *Pipe, b: u8) void {
+        self.buf[self.head % CAP] = b;
+        self.head +%= 1;
+    }
+    pub fn pop(self: *Pipe) u8 {
+        const b = self.buf[self.tail % CAP];
+        self.tail +%= 1;
+        return b;
+    }
+};
 
 /// Character-device operations (e.g. /dev/null, /dev/zero).
 pub const DevOps = struct {
@@ -55,6 +82,9 @@ pub const Node = struct {
     // Read-only ext4 file/dir: lazily loaded into `data` on first read.
     on_ext: bool = false,
     ext_ino: u32 = 0,
+
+    // Anonymous pipe.
+    pipe: ?*Pipe = null,
 };
 
 var alloc: std.mem.Allocator = undefined;
@@ -233,6 +263,19 @@ pub fn readAt(node: *Node, buf: []u8, offset: usize) Error!usize {
     switch (node.kind) {
         .dir => return Error.IsDirectory,
         .chardev => return (node.dev orelse return Error.NotSupported).read(buf),
+        .pipe => {
+            const p = node.pipe orelse return Error.NotSupported;
+            asm volatile ("sti");
+            while (p.avail() == 0) {
+                if (p.writers == 0) { asm volatile ("cli"); return 0; }
+                asm volatile ("hlt");
+            }
+            asm volatile ("cli");
+            var n: usize = 0;
+            while (n < buf.len and p.avail() > 0) : (n += 1) buf[n] = p.pop();
+
+            return n;
+        },
         .file => {
             if (node.on_disk and node.data.len == 0 and node.size > 0) loadDisk(node);
             if (node.on_ext and node.data.len == 0 and node.size > 0) loadExt(node);
@@ -249,6 +292,18 @@ pub fn writeAt(node: *Node, buf: []const u8, offset: usize) Error!usize {
     switch (node.kind) {
         .dir => return Error.IsDirectory,
         .chardev => return (node.dev orelse return Error.NotSupported).write(buf),
+        .pipe => {
+            const p = node.pipe orelse return Error.NotSupported;
+            var written: usize = 0;
+            while (written < buf.len) {
+                asm volatile ("sti");
+                while (p.free() == 0) asm volatile ("hlt");
+                asm volatile ("cli");
+                while (written < buf.len and p.free() > 0) : (written += 1)
+                    p.push(buf[written]);
+            }
+            return buf.len;
+        },
         .file => {
             const end = offset + buf.len;
             if (end > node.data.len) {
@@ -311,4 +366,19 @@ pub fn init() Error!void {
     _ = try mkdev("/dev/null", &null_ops);
     _ = try mkdev("/dev/zero", &zero_ops);
     _ = try mkdev("/dev/console", &console_ops);
+}
+
+/// Create an anonymous pipe. Returns two nodes: [0]=read-end, [1]=write-end.
+/// Both share the same Pipe object. Closing all write-end fds signals EOF.
+pub fn mkpipe() Error![2]*Node {
+    const p = try alloc.create(Pipe);
+    p.* = .{};
+
+    const rend = try alloc.create(Node);
+    rend.* = .{ .kind = .pipe, .name = try dupName("[pipe:r]"), .pipe = p };
+
+    const wend = try alloc.create(Node);
+    wend.* = .{ .kind = .pipe, .name = try dupName("[pipe:w]"), .pipe = p };
+
+    return .{ rend, wend };
 }

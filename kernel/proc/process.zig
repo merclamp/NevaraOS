@@ -18,6 +18,9 @@ pub const File = struct {
     node: *vfs.Node = undefined,
     offset: usize = 0,
     used: bool = false,
+    /// True for the write end of a pipe. We track this so we can decrement
+    /// pipe.writers when every write-end fd is closed.
+    is_write_pipe: bool = false,
 };
 
 const State = enum { unused, running, zombie };
@@ -165,6 +168,12 @@ pub fn fork(tf: *const usermode.TrapFrame) isize {
         .fds = parent.fds,
         .start = .fork_resume,
     };
+    // Bump the pipe writers count for every write-end fd inherited by the child.
+    for (&p.fds) |*f| {
+        if (f.used and f.is_write_pipe) {
+            if (f.node.pipe) |pipe| pipe.writers += 1;
+        }
+    }
     p.fork_tf = tf.*;
     p.fork_tf.rax = 0;
 
@@ -205,6 +214,14 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
     const image = node.data[0..node.size];
 
     // Commit: swap to a fresh address space and discard the old one.
+    // First, close-on-exec: release any pipe write-ends with fd >= 3 (they are
+    // implicit close-on-exec so the reader eventually sees EOF).
+    for (p.fds[3..]) |*f| {
+        if (f.used and f.is_write_pipe) {
+            if (f.node.pipe) |pipe| { if (pipe.writers > 0) pipe.writers -= 1; }
+            f.used = false;
+        }
+    }
     const new_cr3 = vmm.createAddressSpace() orelse return -12; // -ENOMEM
     const old_cr3 = p.cr3;
     vmm.switchTo(new_cr3);
@@ -227,6 +244,14 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
 /// reaps the remaining resources in wait4().
 pub fn exit(code: i32) noreturn {
     const p = current();
+    // Close all file descriptors so pipe write-ends are properly released.
+    for (&p.fds) |*f| {
+        if (!f.used) continue;
+        if (f.is_write_pipe) {
+            if (f.node.pipe) |pipe| { if (pipe.writers > 0) pipe.writers -= 1; }
+        }
+        f.used = false;
+    }
     p.exit_code = code;
     p.state = .zombie;
     vmm.switchTo(vmm.kernelCr3()); // stop using our soon-to-be-freed tables
