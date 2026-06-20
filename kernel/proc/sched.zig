@@ -8,20 +8,32 @@
 //! `context_switch` lands in `threadStart`, which then calls the entry function.
 
 const console = @import("../arch/x86_64/console.zig");
+const gdt = @import("../arch/x86_64/gdt.zig");
+const vmm = @import("../mm/vmm.zig");
 const heap = @import("../mm/heap.zig");
+
+/// The syscall entry stack (`kernel_rsp` in usermode.S). Re-pointed on every
+/// context switch to the running thread's kernel stack.
+extern var kernel_rsp: u64;
 
 pub const State = enum { ready, running, finished };
 
 pub const Thread = struct {
     /// Saved stack pointer. Must be the field `context_switch` writes through.
     rsp: u64 = 0,
+    /// Top of this thread's kernel stack (TSS.rsp0 + syscall stack while it
+    /// runs). Lets ring3 traps land on a per-thread kernel stack.
+    kstack_top: u64 = 0,
+    /// Physical address space (CR3) to install when this thread runs. Lets the
+    /// scheduler switch address spaces between processes on preemption.
+    cr3: u64 = 0,
     id: u32 = 0,
     state: State = .ready,
     entry: ?*const fn () void = null,
     stack: []u8 = &.{},
 };
 
-const MAX_THREADS = 16;
+const MAX_THREADS = 64;
 const STACK_SIZE = 16 * 1024;
 
 var threads: [MAX_THREADS]?*Thread = .{null} ** MAX_THREADS;
@@ -34,11 +46,12 @@ extern fn context_switch(old_rsp: *u64, new_rsp: u64) void;
 
 /// Register the current (kmain) execution context as the first thread.
 pub fn init() void {
-    bootstrap = .{ .id = next_id, .state = .running };
+    bootstrap = .{ .id = next_id, .state = .running, .kstack_top = gdt.kernelStackTop(), .cr3 = vmm.currentCr3() };
     next_id += 1;
     current = &bootstrap;
     threads[0] = &bootstrap;
     count = 1;
+    applyKernelStack();
 }
 
 pub fn currentThread() *Thread {
@@ -56,6 +69,46 @@ fn finish() noreturn {
     while (true) yield();
 }
 
+/// Terminate the current thread (e.g. a process calling exit). It is removed
+/// from rotation and the CPU is handed to another thread, never to return here.
+pub fn exitThread() noreturn {
+    finish();
+}
+
+/// Remove a finished thread from the run set and free its kernel stack. Caller
+/// must ensure `t` is not the current thread. Interrupt-safe.
+pub fn destroyThread(t: *Thread) void {
+    const flags = saveIrq();
+    defer restoreIrq(flags);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (threads[i].? == t) {
+            var j = i;
+            while (j + 1 < count) : (j += 1) threads[j] = threads[j + 1];
+            count -= 1;
+            threads[count] = null;
+            break;
+        }
+    }
+    const a = heap.allocator();
+    a.free(t.stack);
+    a.destroy(t);
+}
+
+inline fn saveIrq() u64 {
+    return asm volatile (
+        \\ pushfq
+        \\ popq %[f]
+        \\ cli
+        : [f] "=r" (-> u64),
+        :
+        : .{ .memory = true });
+}
+
+inline fn restoreIrq(flags: u64) void {
+    if (flags & 0x200 != 0) asm volatile ("sti" ::: .{ .memory = true });
+}
+
 /// Hand-craft a new thread's stack so the first context switch starts it.
 fn initContext(t: *Thread) void {
     const top = (@intFromPtr(t.stack.ptr) + t.stack.len) & ~@as(usize, 0xF);
@@ -70,6 +123,7 @@ fn initContext(t: *Thread) void {
         @as(*u64, @ptrFromInt(entry_slot - 56 + i * 8)).* = 0; // r15..rbx
     }
     t.rsp = entry_slot - 56;
+    t.kstack_top = top;
 }
 
 /// Create a new ready thread running `entry`.
@@ -103,6 +157,13 @@ fn pickNext() *Thread {
     return current;
 }
 
+/// Re-point the CPU's ring-0 stacks (TSS.rsp0 and the syscall stack) at the
+/// current thread, so its ring3->ring0 traps use its own kernel stack.
+fn applyKernelStack() void {
+    kernel_rsp = current.kstack_top;
+    gdt.setKernelStack(current.kstack_top);
+}
+
 /// Voluntarily give the CPU to the next ready thread.
 pub fn yield() void {
     const prev = current;
@@ -111,9 +172,10 @@ pub fn yield() void {
     if (prev.state == .running) prev.state = .ready;
     next.state = .running;
     current = next;
+    applyKernelStack();
+    if (next.cr3 != 0 and next.cr3 != prev.cr3) vmm.switchTo(next.cr3);
     context_switch(&prev.rsp, next.rsp);
 }
-
 /// Total timer ticks observed (for diagnostics).
 pub var ticks: u64 = 0;
 

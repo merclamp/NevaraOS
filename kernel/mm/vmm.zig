@@ -148,3 +148,83 @@ pub fn createAddressSpace() ?usize {
     for (0..512) |i| new[i] = kern[i];
     return frame;
 }
+
+/// Physical address of the shared kernel address space (PML4 in CR3 at init).
+pub fn kernelCr3() usize {
+    return kernel_pml4;
+}
+
+/// Recursively deep-copy a page-table subtree, allocating fresh frames and
+/// copying leaf page contents. `depth` is the number of levels below this table
+/// (3 = PDPT, 2 = PD, 1 = PT). Returns the new table's physical address.
+fn cloneTable(table_phys: usize, depth: u32) ?usize {
+    const new_frame = pmm.alloc() orelse return null;
+    const dst = tableEntries(new_frame);
+    const src = tableEntries(table_phys);
+    for (0..512) |i| {
+        const e = src[i];
+        if (e & PRESENT == 0) {
+            dst[i] = 0;
+            continue;
+        }
+        if (depth == 1) {
+            const page = pmm.alloc() orelse return null;
+            const s: [*]const u8 = @ptrFromInt(e & ADDR_MASK);
+            const d: [*]u8 = @ptrFromInt(page);
+            @memcpy(d[0..PAGE_SIZE], s[0..PAGE_SIZE]);
+            dst[i] = page | (e & ~ADDR_MASK);
+        } else if (e & HUGE != 0) {
+            dst[i] = e; // huge page (kernel only; never in user space)
+        } else {
+            const child = cloneTable(e & ADDR_MASK, depth - 1) orelse return null;
+            dst[i] = child | (e & ~ADDR_MASK);
+        }
+    }
+    return new_frame;
+}
+
+/// Create a child address space that is a deep copy of `parent_pml4`'s user
+/// mappings while sharing the kernel half (PML4[0]). Used by fork().
+pub fn forkAddressSpace(parent_pml4: usize) ?usize {
+    const new_frame = pmm.alloc() orelse return null;
+    const dst = tableEntries(new_frame);
+    const par = tableEntries(parent_pml4);
+    const kern = tableEntries(kernel_pml4);
+    for (0..512) |i| {
+        const e = par[i];
+        if (i == 0 or (e & PRESENT) == 0) {
+            dst[i] = kern[i]; // share the kernel half (and leave empty slots)
+        } else {
+            const child = cloneTable(e & ADDR_MASK, 3) orelse return null;
+            dst[i] = child | (e & ~ADDR_MASK);
+        }
+    }
+    return new_frame;
+}
+
+fn freeTable(table_phys: usize, depth: u32) void {
+    const tab = tableEntries(table_phys);
+    for (0..512) |i| {
+        const e = tab[i];
+        if (e & PRESENT == 0) continue;
+        if (depth == 1) {
+            pmm.free(e & ADDR_MASK);
+        } else if (e & HUGE == 0) {
+            freeTable(e & ADDR_MASK, depth - 1);
+        }
+    }
+    pmm.free(table_phys);
+}
+
+/// Free a user address space: its private user page tables and leaf frames, plus
+/// the top-level PML4 frame. The shared kernel half (PML4[0]) is left intact.
+pub fn freeUserSpace(pml4: usize) void {
+    const tab = tableEntries(pml4);
+    const kern = tableEntries(kernel_pml4);
+    for (1..512) |i| {
+        const e = tab[i];
+        if (e & PRESENT == 0 or e == kern[i]) continue;
+        freeTable(e & ADDR_MASK, 3);
+    }
+    pmm.free(pml4);
+}

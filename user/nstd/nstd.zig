@@ -64,6 +64,25 @@ pub fn spawn(path: [*:0]const u8, argv: [*]const ?[*:0]const u8) isize {
     return @bitCast(syscall3(SYS_spawn, @intFromPtr(path), @intFromPtr(argv), 0));
 }
 
+/// fork(): returns the child pid in the parent, 0 in the child, -1 on error.
+pub fn fork() isize {
+    return @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (@as(usize, 57)),
+        : .{ .rcx = true, .r11 = true, .memory = true }));
+}
+
+/// execve(): replace the current image. Only returns (negative) on failure.
+pub fn execve(path: [*:0]const u8, argv: [*]const ?[*:0]const u8) isize {
+    return @bitCast(syscall3(59, @intFromPtr(path), @intFromPtr(argv), 0));
+}
+
+/// waitpid(): reap a child. `options` bit 0 = WNOHANG. Returns the reaped pid,
+/// 0 (WNOHANG, none ready), or negative on error.
+pub fn waitpid(pid: isize, status: *u32, options: usize) isize {
+    return @bitCast(syscall3(61, @bitCast(pid), @intFromPtr(status), options));
+}
+
 /// A null-terminated C string as a Zig slice.
 pub fn span(p: [*:0]const u8) []const u8 {
     var len: usize = 0;

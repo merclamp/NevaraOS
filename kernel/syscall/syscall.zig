@@ -1,15 +1,13 @@
 //! Linux-compatible system call layer.
 //!
-//! Provides a per-task file-descriptor table, a dispatcher keyed by the Linux
-//! x86_64 syscall numbers, and handlers that operate on the VFS. For now there
-//! is a single global descriptor table (one kernel task); it becomes per-process
-//! once we have userspace. The actual `syscall`-instruction entry from ring 3 is
-//! wired up in the userspace phase; until then the dispatcher is the entry
-//! point, callable directly with Linux-style register arguments.
+//! Dispatches on the Linux x86_64 syscall numbers. File descriptors and the
+//! program break live in the per-process state (proc/process.zig); process
+//! control (fork/execve/wait4/exit) is delegated there too.
 
 const std = @import("std");
 const vfs = @import("../fs/vfs.zig");
 const sched = @import("../proc/sched.zig");
+const process = @import("../proc/process.zig");
 const pmm = @import("../mm/pmm.zig");
 const vmm = @import("../mm/vmm.zig");
 const heap = @import("../mm/heap.zig");
@@ -23,14 +21,19 @@ const SYS_close: usize = 3;
 const SYS_lseek: usize = 8;
 const SYS_brk: usize = 12;
 const SYS_getpid: usize = 39;
+const SYS_fork: usize = 57;
+const SYS_execve: usize = 59;
+const SYS_exit: usize = 60;
+const SYS_wait4: usize = 61;
+const SYS_mkdir: usize = 83;
 const SYS_getdents64: usize = 217;
 const SYS_spawn: usize = 1000;
-const SYS_exit: usize = 60;
-const SYS_mkdir: usize = 83;
 
 // errno values (returned negated).
 const ENOENT: isize = 2;
 const EBADF: isize = 9;
+const ECHILD: isize = 10;
+const ENOMEM: isize = 12;
 const EEXIST: isize = 17;
 const ENOTDIR: isize = 20;
 const EISDIR: isize = 21;
@@ -47,20 +50,8 @@ const SEEK_SET: usize = 0;
 const SEEK_CUR: usize = 1;
 const SEEK_END: usize = 2;
 
-const MAX_FD = 64;
-
-const File = struct {
-    node: *vfs.Node = undefined,
-    offset: usize = 0,
-    used: bool = false,
-};
-
-var fds: [MAX_FD]File = .{File{}} ** MAX_FD;
-
-// Userspace program break (single task for now). The heap sits between the ELF
-// segments (64 TiB base) and the user stack region.
+// User program break base (per process; each has its own address space).
 const USER_HEAP_BASE: usize = 0x4000_1000_0000;
-var user_brk: usize = 0;
 
 fn errnoFor(e: vfs.Error) isize {
     return -switch (e) {
@@ -73,9 +64,14 @@ fn errnoFor(e: vfs.Error) isize {
     };
 }
 
+fn fdTable() *[process.MAX_FD]process.File {
+    return &process.current().fds;
+}
+
 fn allocFd() ?usize {
+    const fds = fdTable();
     var i: usize = 3; // 0,1,2 reserved for stdio
-    while (i < MAX_FD) : (i += 1) {
+    while (i < process.MAX_FD) : (i += 1) {
         if (!fds[i].used) return i;
     }
     return null;
@@ -86,14 +82,9 @@ fn cstr(ptr: usize) []const u8 {
     return std.mem.span(p);
 }
 
-/// Bind stdin/stdout/stderr to /dev/console.
-pub fn init() void {
-    const con = vfs.resolve("/dev/console") catch return;
-    for (0..3) |i| fds[i] = .{ .node = con, .offset = 0, .used = true };
-}
-
 fn sysWrite(fd: usize, buf_ptr: usize, count: usize) isize {
-    if (fd >= MAX_FD or !fds[fd].used) return -EBADF;
+    const fds = fdTable();
+    if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
     const buf: [*]const u8 = @ptrFromInt(buf_ptr);
     const f = &fds[fd];
     const n = vfs.writeAt(f.node, buf[0..count], f.offset) catch |e| return errnoFor(e);
@@ -102,7 +93,8 @@ fn sysWrite(fd: usize, buf_ptr: usize, count: usize) isize {
 }
 
 fn sysRead(fd: usize, buf_ptr: usize, count: usize) isize {
-    if (fd >= MAX_FD or !fds[fd].used) return -EBADF;
+    const fds = fdTable();
+    if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
     const buf: [*]u8 = @ptrFromInt(buf_ptr);
     const f = &fds[fd];
     const n = vfs.readAt(f.node, buf[0..count], f.offset) catch |e| return errnoFor(e);
@@ -112,7 +104,7 @@ fn sysRead(fd: usize, buf_ptr: usize, count: usize) isize {
 
 fn sysOpen(path_ptr: usize, flags: usize) isize {
     const path = cstr(path_ptr);
-    var node = vfs.resolve(path) catch |e| blk: {
+    const node = vfs.resolve(path) catch |e| blk: {
         if (e == error.NotFound and (flags & O_CREAT) != 0) {
             break :blk vfs.create(path, .file) catch |ce| return errnoFor(ce);
         }
@@ -121,18 +113,20 @@ fn sysOpen(path_ptr: usize, flags: usize) isize {
     if ((flags & O_TRUNC) != 0 and node.kind == .file) node.size = 0;
     const fd = allocFd() orelse return -EBADF;
     const start: usize = if ((flags & O_APPEND) != 0) node.size else 0;
-    fds[fd] = .{ .node = node, .offset = start, .used = true };
+    fdTable()[fd] = .{ .node = node, .offset = start, .used = true };
     return @intCast(fd);
 }
 
 fn sysClose(fd: usize) isize {
-    if (fd >= MAX_FD or !fds[fd].used) return -EBADF;
+    const fds = fdTable();
+    if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
     if (fd > 2) fds[fd].used = false; // keep stdio open
     return 0;
 }
 
 fn sysLseek(fd: usize, offset: usize, whence: usize) isize {
-    if (fd >= MAX_FD or !fds[fd].used) return -EBADF;
+    const fds = fdTable();
+    if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
     const f = &fds[fd];
     const base: usize = switch (whence) {
         SEEK_SET => 0,
@@ -149,37 +143,6 @@ fn sysMkdir(path_ptr: usize) isize {
     return 0;
 }
 
-/// spawn(path, argv): load an ELF from the VFS and run it as an isolated child
-/// process. argv strings (in the caller's address space) are copied into kernel
-/// memory before the address-space switch. Returns the child's exit code.
-fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
-    const path = cstr(path_ptr);
-    const node = vfs.resolve(path) catch |e| return errnoFor(e);
-    if (node.kind != .file) return -EINVAL;
-    const image = node.data[0..node.size];
-
-    const a = heap.allocator();
-    var bufs: [16][]u8 = undefined;
-    var args: [16][]const u8 = undefined;
-    var n: usize = 0;
-    if (argv_ptr != 0) {
-        const argv: [*]const usize = @ptrFromInt(argv_ptr);
-        while (n < 16 and argv[n] != 0) : (n += 1) {
-            const s = cstr(argv[n]);
-            const buf = a.alloc(u8, s.len) catch break;
-            @memcpy(buf, s);
-            bufs[n] = buf;
-            args[n] = buf;
-        }
-    }
-
-    const code = usermode.spawnImage(image, args[0..n]);
-
-    var i: usize = 0;
-    while (i < n) : (i += 1) a.free(bufs[i]);
-    return code;
-}
-
 // Linux dirent type values.
 const DT_CHR: u8 = 2;
 const DT_DIR: u8 = 4;
@@ -189,11 +152,9 @@ inline fn alignUp8(v: usize) usize {
     return (v + 7) & ~@as(usize, 7);
 }
 
-/// getdents64(fd, buf, count): fill `buf` with linux_dirent64 records for the
-/// directory. The fd offset tracks the next child index. Returns bytes written,
-/// 0 at end of directory.
 fn sysGetdents64(fd: usize, buf_ptr: usize, count: usize) isize {
-    if (fd >= MAX_FD or !fds[fd].used) return -EBADF;
+    const fds = fdTable();
+    if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
     const f = &fds[fd];
     const dir = f.node;
     if (dir.kind != .dir) return -ENOTDIR;
@@ -202,7 +163,6 @@ fn sysGetdents64(fd: usize, buf_ptr: usize, count: usize) isize {
     var written: usize = 0;
 
     while (vfs.readdir(dir, f.offset)) |child| {
-        // linux_dirent64: u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type, name\0
         const name = child.name;
         const reclen = alignUp8(19 + name.len + 1);
         if (written + reclen > count) break;
@@ -226,31 +186,66 @@ fn sysGetdents64(fd: usize, buf_ptr: usize, count: usize) isize {
 }
 
 /// brk(addr): set the program break. addr==0 queries it. Grows by mapping fresh
-/// user pages; returns the (new) break, or the current break on failure.
+/// user pages in the current process's address space.
 fn sysBrk(addr: usize) isize {
-    if (user_brk == 0) user_brk = USER_HEAP_BASE;
-    if (addr == 0 or addr < USER_HEAP_BASE) return @intCast(user_brk);
+    const p = process.current();
+    if (p.brk == 0) p.brk = USER_HEAP_BASE;
+    if (addr == 0 or addr < USER_HEAP_BASE) return @intCast(p.brk);
 
     const flags = vmm.PRESENT | vmm.WRITABLE | vmm.USER;
-    var page = (user_brk + 0xFFF) & ~@as(usize, 0xFFF);
+    var page = (p.brk + 0xFFF) & ~@as(usize, 0xFFF);
     while (page < addr) : (page += 0x1000) {
         if (vmm.walk(page) == null) {
-            const frame = pmm.alloc() orelse return @intCast(user_brk);
-            if (!vmm.map(page, frame, flags)) return @intCast(user_brk);
+            const frame = pmm.alloc() orelse return @intCast(p.brk);
+            if (!vmm.map(page, frame, flags)) return @intCast(p.brk);
             @memset(@as([*]u8, @ptrFromInt(page))[0..0x1000], 0);
         }
     }
-    user_brk = addr;
+    p.brk = addr;
     return @intCast(addr);
 }
 
-/// Reset the program break (call when starting a fresh user program).
-pub fn resetBrk() void {
-    user_brk = 0;
+/// spawn(path, argv): convenience for a blocking run — create a child process
+/// from the image and wait for it. Returns its exit code.
+fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
+    const path = cstr(path_ptr);
+    const node = vfs.resolve(path) catch |e| return errnoFor(e);
+    if (node.kind != .file) return -EINVAL;
+    const image = node.data[0..node.size];
+
+    const a = heap.allocator();
+    var bufs: [16][]u8 = undefined;
+    var args: [16][]const u8 = undefined;
+    var n: usize = 0;
+    if (argv_ptr != 0) {
+        const argv: [*]const usize = @ptrFromInt(argv_ptr);
+        while (n < 16 and argv[n] != 0) : (n += 1) {
+            const s = cstr(argv[n]);
+            const buf = a.alloc(u8, s.len) catch break;
+            @memcpy(buf, s);
+            bufs[n] = buf;
+            args[n] = buf;
+        }
+    }
+
+    const pid = process.spawnImage(image, args[0..n]);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) a.free(bufs[i]);
+
+    if (pid < 0) return -1;
+    var status: u32 = 0;
+    _ = process.wait4(pid, @intFromPtr(&status), 0);
+    return @intCast((status >> 8) & 0xFF);
 }
 
-/// Central dispatcher: invoked with Linux-style register arguments.
-pub fn dispatch(num: usize, a1: usize, a2: usize, a3: usize) isize {
+/// Central dispatcher, invoked from the SYSCALL handler with a saved trap frame.
+/// Returns the value to place in the caller's rax (exit/execve do not return).
+pub fn handle(tf: *usermode.TrapFrame) isize {
+    const num = tf.rax;
+    const a1 = tf.rdi;
+    const a2 = tf.rsi;
+    const a3 = tf.rdx;
     return switch (num) {
         SYS_read => sysRead(a1, a2, a3),
         SYS_write => sysWrite(a1, a2, a3),
@@ -258,8 +253,11 @@ pub fn dispatch(num: usize, a1: usize, a2: usize, a3: usize) isize {
         SYS_close => sysClose(a1),
         SYS_lseek => sysLseek(a1, a2, a3),
         SYS_brk => sysBrk(a1),
-        SYS_getpid => @intCast(sched.currentThread().id),
-        SYS_exit => 0, // no userspace yet; nothing to tear down
+        SYS_getpid => @intCast(process.current().pid),
+        SYS_fork => process.fork(tf),
+        SYS_execve => process.exec(cstr(a1), a2),
+        SYS_exit => process.exit(@bitCast(@as(u32, @truncate(a1)))),
+        SYS_wait4 => process.wait4(@bitCast(a1), a2, a3),
         SYS_mkdir => sysMkdir(a1),
         SYS_getdents64 => sysGetdents64(a1, a2, a3),
         SYS_spawn => sysSpawn(a1, a2),

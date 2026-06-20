@@ -107,6 +107,18 @@ pub fn init() void {
     console.writeString("[gdt] GDT loaded, segments reloaded, TSS active\n");
 }
 
+/// Top of the GDT's built-in ring-0 stack (used by the bootstrap/kmain context).
+pub fn kernelStackTop() u64 {
+    return tss.rsp0;
+}
+
+/// Point TSS.rsp0 at `top`. Called on every context switch so a ring3->ring0
+/// transition (interrupt or syscall) lands on the current thread's own kernel
+/// stack, which is required once multiple user processes run concurrently.
+pub fn setKernelStack(top: u64) void {
+    tss.rsp0 = top;
+}
+
 // Implemented in flush.S — Zig 0.16 inline asm cannot express these safely.
 extern fn gdt_flush(ptr: *const GdtPointer) void;
 extern fn tss_flush(selector: u16) void;

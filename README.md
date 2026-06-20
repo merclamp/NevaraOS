@@ -52,7 +52,7 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 
 ## Current status
 
-Six foundational stages are done and verified in QEMU:
+Seven foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -73,13 +73,16 @@ Six foundational stages are done and verified in QEMU:
   The framebuffer is an ANSI/VT100 terminal (16 colours, block cursor, cursor
   and erase escapes). **nsh** reads a line, parses argv, and spawns `/bin/<cmd>`;
   **ZInit** supervises it getty-style, respawning the shell whenever it exits.
+- ✅ **Concurrent multitasking** — real `fork` / `execve` / `wait` / `exit`: every
+  process gets its own address space and kernel thread, the timer round-robins
+  between them, and **nsh** runs commands the Unix way (fork + exec + wait), with
+  background jobs via a trailing `&`. The `demo` builtin forks two children whose
+  output interleaves to show preemption.
 
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Concurrent multitasking** — running several user processes at once
-  (`fork`/`exec`/`wait`); process spawning is synchronous for now.
 - ⏳ **Real filesystems** — reading and writing actual disks.
 - ⏳ **More userland** — more NevBox applets, a richer ZLibc, pipes and
   redirection in nsh.
@@ -156,18 +159,19 @@ the serial port (COM1) for debugging.
   by on-demand page mappings; supports splitting, coalescing, and arbitrary
   alignment.
 
-**Processes & scheduling.** Kernel threads each own a heap-allocated stack;
+**Processes & scheduling.** Every process owns an address space, a file-
+descriptor table, a program break, and a kernel thread the scheduler time-slices.
+Each thread keeps its own kernel stack; the scheduler re-points TSS.rsp0 and the
+SYSCALL stack on every switch so concurrent ring-3 processes trap onto their own
+stacks, and it reloads CR3 so preemption lands in the right address space.
 `context_switch` (assembly) saves the callee-saved registers and RFLAGS, so the
-interrupt flag is per-thread and new threads start preemptible. The 8259 PIC is
-remapped to vectors 0x20-0x2F and the PIT fires IRQ0 at 100 Hz; the timer
-handler acknowledges the interrupt and round-robins to the next ready thread.
-Cooperative `yield()` uses the same switch primitive.
+interrupt flag is per-thread. The 8259 PIC is remapped to vectors 0x20-0x2F and
+the PIT fires IRQ0 at 100 Hz to drive round-robin preemption.
 
 **Filesystem & system calls.** A virtual filesystem layer backs an in-memory
 (tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
 `/dev/zero`, `/dev/console`); files grow their buffers from the heap. On top sits
-a file-descriptor table (a single global one for now, per-process later) and a
-dispatcher keyed by the Linux x86_64
+a per-process file-descriptor table and a dispatcher keyed by the Linux x86_64
 syscall numbers (read, write, open, close, lseek, getpid, brk, mkdir,
 getdents64, ...), returning negative errno on failure.
 
@@ -181,17 +185,19 @@ word/line kills, and command history, all echoed through the escape sequences th
 framebuffer terminal understands. `/dev/console`'s read side returns one
 completed line. The keyboard IRQ is unmasked just before ZInit starts.
 
-**Userspace.** Ring 3 is entered via `iretq`; user programs trap into the kernel
-with the `syscall` instruction (SYSCALL/SYSRET MSRs configured). An ELF64 loader
-maps static executables into **per-process address spaces** (each its own PML4,
-sharing the kernel mappings), so every program can be linked at the same fixed
-high base without colliding. `spawn(path, argv)` loads a binary from the VFS and
-runs it as an isolated process, returning its exit code (synchronous for now).
+**Userspace & multitasking.** Ring 3 is entered via `iretq`; user programs trap
+in with the `syscall` instruction, which saves a full trap frame and returns the
+same way (so fork can resume a child from a copied frame). An ELF64 loader maps
+static executables into **per-process address spaces** (each its own PML4 sharing
+the kernel half), so every program links at the same fixed high base without
+colliding. The process syscalls are real: `fork` deep-copies the caller's user
+pages, `execve` swaps in a new image, `wait4`/`waitpid` reap a zombie child (with
+WNOHANG), and `exit` turns a process into a zombie until its parent reaps it.
 Userland is built on two Zig runtimes — **nstd** (native, libc-free) and
-**ZLibc** (a small C library compiled by `zig cc`); on top of them sit **ZInit**
-(PID 1, a getty-style supervisor that respawns the shell), **nsh** (the
-interactive REPL), and **NevBox** (a multi-call coreutils binary installed under
-`echo`/`cat`/`ls`).
+**ZLibc** (a small C library compiled by `zig cc`); on top sit **ZInit** (PID 1,
+a getty-style supervisor that respawns the shell), **nsh** (the interactive REPL,
+which runs commands as fork + execve + wait and supports `&` background jobs), and
+**NevBox** (a multi-call coreutils binary installed under `echo`/`cat`/`ls`).
 
 **Source layout.**
 
@@ -204,7 +210,7 @@ kernel/
   font.zig           bitmap font (public domain)
   arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal, PS/2 keyboard
   mm/                pmm, vmm, heap
-  proc/              scheduler and kernel threads
+  proc/              scheduler, kernel threads, and the process model
   fs/                virtual filesystem (in-memory tmpfs + devices)
   syscall/           file descriptors and the syscall dispatcher
   exec/elf.zig       ELF64 loader

@@ -10,6 +10,7 @@ const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const heap = @import("mm/heap.zig");
 const sched = @import("proc/sched.zig");
+const process = @import("proc/process.zig");
 const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
@@ -66,23 +67,29 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         testVmm();
         heap.init();
         testHeap();
-        testSched();
-        testPreempt();
         testVfs();
-        testSyscall();
         usermode.init();
-        pic.unmask(1); // enable the keyboard so the shell can read input
+        process.init(); // scheduler + the kernel (kmain) process, stdio bound
         installBinaries();
-        runZInit();
+
+        // Turn on preemption (timer) and keyboard, then run userspace.
+        pit.init(100);
+        pic.unmask(0); // timer IRQ0 -> round-robin preemption
+        pic.unmask(1); // keyboard
+        asm volatile ("sti");
+
+        console.writeString("[boot] starting /bin/zinit as PID 1\n");
+        _ = process.spawnImage(@embedFile("zinit_elf"), &.{"/bin/zinit"});
+
+        // The kmain process becomes the idle task: hand the CPU to the
+        // user processes and halt whenever nothing else is runnable.
+        while (true) {
+            sched.yield();
+            asm volatile ("hlt");
+        }
     } else {
         console.writeString("[mb2] skipping memory map (not multiboot2-booted)\n");
     }
-
-
-    // Smoke-test the interrupt path: a breakpoint must be caught and resumed.
-    console.writeString("[boot] triggering test breakpoint (int3)...\n");
-    asm volatile ("int3");
-    console.writeString("[boot] resumed after breakpoint\n");
 
     console.writeString("[boot] kmain alive, halting.\n");
     hang();
@@ -190,71 +197,6 @@ fn testHeap() void {
     console.writeString(" KiB\n");
 }
 
-fn worker(comptime tag: []const u8, comptime rounds: usize) fn () void {
-    return struct {
-        fn run() void {
-            var i: usize = 0;
-            while (i < rounds) : (i += 1) {
-                console.writeString("    [" ++ tag ++ "] tick\n");
-                sched.yield();
-            }
-            console.writeString("    [" ++ tag ++ "] done\n");
-        }
-    }.run;
-}
-
-/// Spawn a few cooperative kernel threads and run them round-robin to completion.
-fn testSched() void {
-    console.writeString("[sched] starting cooperative threads A, B, C\n");
-    sched.init();
-    _ = sched.spawn(worker("A", 3)) catch return;
-    _ = sched.spawn(worker("B", 3)) catch return;
-    _ = sched.spawn(worker("C", 2)) catch return;
-
-    while (sched.runnableOthers() > 0) sched.yield();
-
-    console.writeString("[sched] all threads finished, back in kmain\n");
-}
-
-/// A CPU-bound worker that never yields — only the timer can take the CPU away.
-fn busyWorker(comptime tag: []const u8, comptime chunks: usize) fn () void {
-    return struct {
-        fn run() void {
-            var c: usize = 0;
-            while (c < chunks) : (c += 1) {
-                // Burn time so a few timer ticks land inside this chunk.
-                var spin: usize = 0;
-                while (spin < 5_000_000) : (spin += 1) {
-                    asm volatile ("" ::: .{ .memory = true });
-                }
-                console.writeString("    [" ++ tag ++ "] chunk\n");
-            }
-            console.writeString("    [" ++ tag ++ "] done\n");
-        }
-    }.run;
-}
-
-/// Preemptive test: CPU-bound threads that never yield, switched by the timer.
-fn testPreempt() void {
-    console.writeString("[sched] preemptive test: timer-driven (100 Hz)\n");
-    sched.init();
-    _ = sched.spawn(busyWorker("X", 3)) catch return;
-    _ = sched.spawn(busyWorker("Y", 3)) catch return;
-    _ = sched.spawn(busyWorker("Z", 3)) catch return;
-
-    pit.init(100); // 100 Hz timer
-    pic.unmask(0); // enable IRQ0
-    asm volatile ("sti");
-
-    while (sched.runnableOthers() > 0) asm volatile ("hlt");
-
-    asm volatile ("cli");
-    pic.mask(0);
-    console.writeString("[sched] preemptive test done, ticks=");
-    console.writeDec(sched.ticks);
-    console.writeString("\n");
-}
-
 /// Exercise the in-memory VFS: directories, files, devices, and path lookup.
 fn testVfs() void {
     vfs.init() catch {
@@ -303,45 +245,7 @@ fn testVfs() void {
     console.writeString("\n");
 }
 
-/// Drive the syscall layer the way userspace will: Linux numbers + arguments.
-fn testSyscall() void {
-    syscall.init(); // bind stdin/stdout/stderr to /dev/console
-
-    // write(1, ...) -> console
-    const greeting = "  [syscall] hello from sys_write(1)\n";
-    _ = syscall.dispatch(1, 1, @intFromPtr(greeting.ptr), greeting.len);
-
-    // mkdir("/tmp"); open("/tmp/a", O_CREAT|O_RDWR)
-    _ = syscall.dispatch(83, @intFromPtr("/tmp"), 0, 0);
-    const fd = syscall.dispatch(2, @intFromPtr("/tmp/a"), 0o100 | 2, 0);
-
-    // write payload, seek to start, read it back
-    const payload = "syscall-io";
-    _ = syscall.dispatch(1, @intCast(fd), @intFromPtr(payload.ptr), payload.len);
-    _ = syscall.dispatch(8, @intCast(fd), 0, 0); // lseek SEEK_SET 0
-
-    var buf: [16]u8 = undefined;
-    const got = syscall.dispatch(0, @intCast(fd), @intFromPtr(&buf), payload.len);
-    _ = syscall.dispatch(3, @intCast(fd), 0, 0); // close
-
-    const pid = syscall.dispatch(39, 0, 0, 0); // getpid
-    const bad = syscall.dispatch(2, @intFromPtr("/nope/x"), 2, 0); // ENOENT path
-
-    console.writeString("[syscall] fd=");
-    console.writeDec(@intCast(fd));
-    console.writeString(" read ");
-    console.writeDec(@intCast(got));
-    console.writeString(" bytes \"");
-    var i: usize = 0;
-    while (i < @as(usize, @intCast(got))) : (i += 1) console.writeByte(buf[i]);
-    console.writeString("\" getpid=");
-    console.writeDec(@intCast(pid));
-    console.writeString(", open(bad)=");
-    console.writeDec(@intCast(-bad));
-    console.writeString(" (errno)\n");
-}
-
-/// Write the embedded userland binaries into /bin (tmpfs) so the spawn syscall
+/// Write the embedded userland binaries into /bin (tmpfs) so processes can load
 /// can load them by path. NevBox is installed under several applet names
 /// (BusyBox-style) so the shell can run /bin/ls, /bin/cat, /bin/echo.
 fn installBinaries() void {
@@ -360,13 +264,6 @@ fn installBinaries() void {
 fn install(path: []const u8, bytes: []const u8) void {
     const f = vfs.create(path, .file) catch return;
     _ = vfs.writeAt(f, bytes, 0) catch {};
-}
-
-/// Launch ZInit (PID 1). It spawns the rest of userland as isolated processes.
-fn runZInit() void {
-    console.writeString("[boot] starting /bin/zinit as PID 1\n");
-    _ = usermode.spawnImage(@embedFile("zinit_elf"), &.{"/bin/zinit"});
-    console.writeString("[boot] init exited\n");
 }
 
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the
