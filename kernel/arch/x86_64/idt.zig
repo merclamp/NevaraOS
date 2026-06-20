@@ -6,6 +6,8 @@
 
 const console = @import("console.zig");
 const gdt = @import("gdt.zig");
+const pic = @import("pic.zig");
+const sched = @import("../../proc/sched.zig");
 
 /// 64-bit IDT gate descriptor (16 bytes).
 const IdtEntry = packed struct {
@@ -107,7 +109,7 @@ fn setGate(vector: usize, handler: u64) void {
 
 /// Install exception gates and load the IDT.
 pub fn init() void {
-    for (0..32) |vec| {
+    for (0..48) |vec| {
         setGate(vec, isr_stub_table[vec]);
     }
 
@@ -117,12 +119,20 @@ pub fn init() void {
     };
     idt_flush(&idtr);
 
-    console.writeString("[idt] IDT loaded, 32 exception handlers installed\n");
+    console.writeString("[idt] IDT loaded, 32 exceptions + 16 IRQ handlers installed\n");
 }
 
 /// Common entry point from isr.S for every CPU exception.
 export fn isrHandler(frame: *InterruptFrame) callconv(.c) void {
     const vec = frame.vector;
+
+    // Hardware IRQs (remapped PIC: vectors 32..47).
+    if (vec >= 32 and vec <= 47) {
+        const irq: u8 = @intCast(vec - 32);
+        pic.sendEOI(irq);
+        if (irq == 0) sched.preempt(); // timer: round-robin preemption
+        return;
+    }
 
     // Breakpoint (#BP) is recoverable: report and resume.
     if (vec == 3) {
@@ -156,5 +166,5 @@ export fn isrHandler(frame: *InterruptFrame) callconv(.c) void {
 }
 
 // Provided by isr.S.
-extern const isr_stub_table: [32]u64;
+extern const isr_stub_table: [48]u64;
 extern fn idt_flush(ptr: *const IdtPointer) void;

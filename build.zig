@@ -48,6 +48,7 @@ pub fn build(b: *std.Build) void {
     kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/boot.S"));
     kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/flush.S"));
     kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/isr.S"));
+    kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/switch.S"));
 
     const kernel_obj = b.addObject(.{
         .name = "kernel",

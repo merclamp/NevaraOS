@@ -9,6 +9,9 @@ const multiboot2 = @import("arch/x86_64/multiboot2.zig");
 const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const heap = @import("mm/heap.zig");
+const sched = @import("proc/sched.zig");
+const pic = @import("arch/x86_64/pic.zig");
+const pit = @import("arch/x86_64/pit.zig");
 
 comptime {
     _ = @import("lib/c.zig"); // export memcpy/memmove/memset/memcmp
@@ -49,6 +52,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
 
     gdt.init();
     idt.init();
+    pic.init(); // remap + mask all IRQs; safe to enable interrupts afterwards
 
     if (magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
         multiboot2.parse(info);
@@ -58,6 +62,8 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         testVmm();
         heap.init();
         testHeap();
+        testSched();
+        testPreempt();
     } else {
         console.writeString("[mb2] skipping memory map (not multiboot2-booted)\n");
     }
@@ -172,6 +178,71 @@ fn testHeap() void {
     console.writeString(", committed=");
     console.writeDec(heap.committedBytes() / 1024);
     console.writeString(" KiB\n");
+}
+
+fn worker(comptime tag: []const u8, comptime rounds: usize) fn () void {
+    return struct {
+        fn run() void {
+            var i: usize = 0;
+            while (i < rounds) : (i += 1) {
+                console.writeString("    [" ++ tag ++ "] tick\n");
+                sched.yield();
+            }
+            console.writeString("    [" ++ tag ++ "] done\n");
+        }
+    }.run;
+}
+
+/// Spawn a few cooperative kernel threads and run them round-robin to completion.
+fn testSched() void {
+    console.writeString("[sched] starting cooperative threads A, B, C\n");
+    sched.init();
+    _ = sched.spawn(worker("A", 3)) catch return;
+    _ = sched.spawn(worker("B", 3)) catch return;
+    _ = sched.spawn(worker("C", 2)) catch return;
+
+    while (sched.runnableOthers() > 0) sched.yield();
+
+    console.writeString("[sched] all threads finished, back in kmain\n");
+}
+
+/// A CPU-bound worker that never yields — only the timer can take the CPU away.
+fn busyWorker(comptime tag: []const u8, comptime chunks: usize) fn () void {
+    return struct {
+        fn run() void {
+            var c: usize = 0;
+            while (c < chunks) : (c += 1) {
+                // Burn time so a few timer ticks land inside this chunk.
+                var spin: usize = 0;
+                while (spin < 40_000_000) : (spin += 1) {
+                    asm volatile ("" ::: .{ .memory = true });
+                }
+                console.writeString("    [" ++ tag ++ "] chunk\n");
+            }
+            console.writeString("    [" ++ tag ++ "] done\n");
+        }
+    }.run;
+}
+
+/// Preemptive test: CPU-bound threads that never yield, switched by the timer.
+fn testPreempt() void {
+    console.writeString("[sched] preemptive test: timer-driven (100 Hz)\n");
+    sched.init();
+    _ = sched.spawn(busyWorker("X", 3)) catch return;
+    _ = sched.spawn(busyWorker("Y", 3)) catch return;
+    _ = sched.spawn(busyWorker("Z", 3)) catch return;
+
+    pit.init(100); // 100 Hz timer
+    pic.unmask(0); // enable IRQ0
+    asm volatile ("sti");
+
+    while (sched.runnableOthers() > 0) asm volatile ("hlt");
+
+    asm volatile ("cli");
+    pic.mask(0);
+    console.writeString("[sched] preemptive test done, ticks=");
+    console.writeDec(sched.ticks);
+    console.writeString("\n");
 }
 
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the
