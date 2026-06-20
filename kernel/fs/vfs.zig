@@ -9,6 +9,7 @@
 const std = @import("std");
 const heap = @import("../mm/heap.zig");
 const console = @import("../arch/x86_64/console.zig");
+const kbd = @import("../arch/x86_64/kbd.zig");
 
 pub const Error = error{
     NotFound,
@@ -191,7 +192,10 @@ fn consoleWrite(buf: []const u8) usize {
     console.writeString(buf);
     return buf.len;
 }
-const console_ops = DevOps{ .read = nullRead, .write = consoleWrite };
+fn consoleRead(buf: []u8) usize {
+    return kbd.readLine(buf);
+}
+const console_ops = DevOps{ .read = consoleRead, .write = consoleWrite };
 
 /// Initialize the VFS: create the root and a minimal /dev.
 pub fn init() Error!void {

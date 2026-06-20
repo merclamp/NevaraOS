@@ -100,6 +100,26 @@ pub fn build(b: *std.Build) void {
     const zinit_elf = zinit_link.addOutputFileArg("zinit.elf");
     zinit_link.addFileArg(zinit_obj.getEmittedBin());
 
+    // nsh — the interactive shell.
+    const nsh_mod = b.createModule(.{
+        .root_source_file = b.path("user/nsh/nsh.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+        .strip = true,
+    });
+    nsh_mod.addImport("nstd", nstd_mod);
+    const nsh_obj = b.addObject(.{ .name = "nsh", .root_module = nsh_mod });
+    const nsh_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
+    nsh_link.addFileArg(b.path("user/linker.ld"));
+    nsh_link.addArg("-o");
+    const nsh_elf = nsh_link.addOutputFileArg("nsh.elf");
+    nsh_link.addFileArg(nsh_obj.getEmittedBin());
+
     // ---- ZLibc: our own C standard library + a C test program ----------
     const zlibc_mod = b.createModule(.{
         .root_source_file = b.path("zlibc/zlibc.zig"),
@@ -162,6 +182,7 @@ pub fn build(b: *std.Build) void {
     kernel_mod.addAnonymousImport("hello_elf", .{ .root_source_file = hello_elf });
     kernel_mod.addAnonymousImport("nevbox_elf", .{ .root_source_file = nevbox_elf });
     kernel_mod.addAnonymousImport("zinit_elf", .{ .root_source_file = zinit_elf });
+    kernel_mod.addAnonymousImport("nsh_elf", .{ .root_source_file = nsh_elf });
 
     const kernel_obj = b.addObject(.{
         .name = "kernel",

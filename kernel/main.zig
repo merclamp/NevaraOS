@@ -71,6 +71,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         testVfs();
         testSyscall();
         usermode.init();
+        pic.unmask(1); // enable the keyboard so the shell can read input
         installBinaries();
         runZInit();
     } else {
@@ -341,13 +342,19 @@ fn testSyscall() void {
 }
 
 /// Write the embedded userland binaries into /bin (tmpfs) so the spawn syscall
-/// can load them by path.
+/// can load them by path. NevBox is installed under several applet names
+/// (BusyBox-style) so the shell can run /bin/ls, /bin/cat, /bin/echo.
 fn installBinaries() void {
     _ = vfs.mkdir("/bin") catch {};
     install("/bin/zinit", @embedFile("zinit_elf"));
-    install("/bin/nevbox", @embedFile("nevbox_elf"));
+    install("/bin/nsh", @embedFile("nsh_elf"));
     install("/bin/hello", @embedFile("hello_elf"));
     install("/bin/init", @embedFile("init_elf"));
+    const nevbox = @embedFile("nevbox_elf");
+    install("/bin/nevbox", nevbox);
+    install("/bin/echo", nevbox);
+    install("/bin/cat", nevbox);
+    install("/bin/ls", nevbox);
 }
 
 fn install(path: []const u8, bytes: []const u8) void {

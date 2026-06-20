@@ -8,6 +8,7 @@ const console = @import("console.zig");
 const gdt = @import("gdt.zig");
 const pic = @import("pic.zig");
 const sched = @import("../../proc/sched.zig");
+const kbd = @import("kbd.zig");
 
 /// 64-bit IDT gate descriptor (16 bytes).
 const IdtEntry = packed struct {
@@ -129,6 +130,7 @@ export fn isrHandler(frame: *InterruptFrame) callconv(.c) void {
     // Hardware IRQs (remapped PIC: vectors 32..47).
     if (vec >= 32 and vec <= 47) {
         const irq: u8 = @intCast(vec - 32);
+        if (irq == 1) kbd.onIrq(); // keyboard: read scancode before EOI
         pic.sendEOI(irq);
         if (irq == 0) sched.preempt(); // timer: round-robin preemption
         return;
