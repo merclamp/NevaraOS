@@ -127,7 +127,15 @@ pub fn main() void {
 
     while (true) {
         reapBackground();
-        nstd.print("\x1b[1;32mnevara$\x1b[0m ");
+        // Prompt: show cwd before the '$'.
+        var cwd_buf: [256]u8 = undefined;
+        cwd_buf[0] = '/'; cwd_buf[1] = 0;
+        const n_cwd = nstd.getcwd(&cwd_buf);
+        const cwd_end: usize = if (n_cwd > 1) @intCast(n_cwd - 1) else 1;
+        nstd.print("\x1b[1;32mnevara:");
+        nstd.print(cwd_buf[0..cwd_end]);
+        nstd.print("$\x1b[0m ");
+
         const n = nstd.read(0, line[0 .. line.len - 1]);
         if (n == 0) continue;
 
@@ -150,14 +158,23 @@ pub fn main() void {
         if (std.mem.eql(u8, cmd, "exit")) return;
         if (std.mem.eql(u8, cmd, "help")) { help(); continue; }
         if (std.mem.eql(u8, cmd, "demo")) { demo(); continue; }
+        if (std.mem.eql(u8, cmd, "cd")) {
+            const dest: [*:0]const u8 = segs[0].argv[1] orelse "/";
+            if (nstd.chdir(dest) < 0) {
+                nstd.print("cd: ");
+                nstd.print(std.mem.span(dest));
+                nstd.print(": no such directory\n");
+            }
+            continue;
+        }
 
         runPipeline(bg);
     }
 }
 
 fn help() void {
-    nstd.print("builtins: help, exit, demo\n");
-    nstd.print("programs: /bin/nevbox (echo cat ls mkfile mkdir), /bin/nsh ...\n");
+    nstd.print("builtins: help, exit, demo, cd\n");
+    nstd.print("programs: echo cat ls mkfile mkdir wc grep head tail cp touch seq tee true false\n");
     nstd.print("pipeline: cmd1 | cmd2 | ...\n");
     nstd.print("redirect: cmd > file   cmd >> file   cmd < file\n");
     nstd.print("background: cmd &\n");

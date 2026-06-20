@@ -17,6 +17,10 @@ const SYS_getpid: usize = 39;
 const SYS_getdents64: usize = 217;
 const SYS_spawn: usize = 1000;
 const SYS_exit: usize = 60;
+const SYS_getcwd: usize = 79;
+const SYS_chdir: usize = 80;
+const SYS_uptime: usize = 1001;
+
 
 inline fn syscall1(n: usize, a1: usize) usize {
     return asm volatile ("syscall"
@@ -54,6 +58,12 @@ pub fn close(fd: usize) void {
     _ = syscall1(SYS_close, fd);
 }
 
+/// lseek(): reposition a file-descriptor offset.
+/// whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END. Returns new offset or negative errno.
+pub fn lseek(fd: usize, offset: isize, whence: usize) isize {
+    return @bitCast(syscall3(SYS_lseek, fd, @bitCast(offset), whence));
+}
+
 pub fn getdents64(fd: usize, buf: []u8) isize {
     return @bitCast(syscall3(SYS_getdents64, fd, @intFromPtr(buf.ptr), buf.len));
 }
@@ -86,6 +96,22 @@ pub fn waitpid(pid: isize, status: *u32, options: usize) isize {
 /// mkdir(): create a directory. Returns 0 on success, negative on error.
 pub fn mkdir(path: [*:0]const u8) isize {
     return @bitCast(syscall1(83, @intFromPtr(path)));
+}
+
+/// chdir(): change working directory. Returns 0 on success, negative errno.
+pub fn chdir(path: [*:0]const u8) isize {
+    return @bitCast(syscall1(SYS_chdir, @intFromPtr(path)));
+}
+
+/// getcwd(): copy current working directory into buf.
+/// Returns string length including null terminator on success, negative on error.
+pub fn getcwd(buf: []u8) isize {
+    return @bitCast(syscall3(SYS_getcwd, @intFromPtr(buf.ptr), buf.len, 0));
+}
+
+/// uptimeTicks(): returns jiffies since boot (PIT at 100 Hz → divide by 100 for seconds).
+pub fn uptimeTicks() u64 {
+    return syscall1(SYS_uptime, 0);
 }
 
 /// pipe(fds): create a read/write fd pair. fds[0]=read, fds[1]=write.

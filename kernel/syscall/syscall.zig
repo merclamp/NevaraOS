@@ -12,6 +12,8 @@ const pmm = @import("../mm/pmm.zig");
 const vmm = @import("../mm/vmm.zig");
 const heap = @import("../mm/heap.zig");
 const usermode = @import("../arch/x86_64/usermode.zig");
+const pit = @import("../arch/x86_64/pit.zig");
+
 
 // Linux x86_64 syscall numbers (subset).
 const SYS_read: usize = 0;
@@ -29,7 +31,11 @@ const SYS_mkdir: usize = 83;
 const SYS_pipe: usize = 22;
 const SYS_dup2: usize = 33;
 const SYS_getdents64: usize = 217;
+const SYS_getcwd: usize = 79;
+const SYS_chdir: usize = 80;
 const SYS_spawn: usize = 1000;
+const SYS_uptime: usize = 1001;
+
 
 // errno values (returned negated).
 const ENOENT: isize = 2;
@@ -41,6 +47,9 @@ const ENOTDIR: isize = 20;
 const EISDIR: isize = 21;
 const EINVAL: isize = 22;
 const ENOSYS: isize = 38;
+const ERANGE: isize = 34;
+const ENAMETOOLONG: isize = 36;
+
 
 // open() flags.
 const O_CREAT: usize = 0o100;
@@ -84,6 +93,53 @@ fn cstr(ptr: usize) []const u8 {
     return std.mem.span(p);
 }
 
+// ---- Path resolution --------------------------------------------------------
+
+/// Normalize an absolute path in-place, collapsing '.' and '..' components.
+/// Writes into `buf` (512 bytes), returns a null-terminated slice or null on
+/// overflow / empty input.
+fn normPath(path: []const u8, buf: *[512]u8) ?[]const u8 {
+    var len: usize = 1;
+    buf[0] = '/';
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (std.mem.eql(u8, comp, "..")) {
+            // Strip the last path component from buf[0..len].
+            if (len > 1) {
+                len -= 1;
+                while (len > 1 and buf[len - 1] != '/') len -= 1;
+                if (len > 1) len -= 1; // remove the '/' separator too
+            }
+            continue;
+        }
+        const sep: usize = if (len > 1) 1 else 0;
+        if (len + sep + comp.len >= buf.len - 1) return null;
+        if (sep > 0) { buf[len] = '/'; len += 1; }
+        @memcpy(buf[len .. len + comp.len], comp);
+        len += comp.len;
+    }
+    buf[len] = 0;
+    return buf[0..len];
+}
+
+/// Join the current process's cwd with `path` (if relative) and normalize.
+/// Returns a null-terminated slice into `buf`, or null on error.
+fn toAbsPath(path: []const u8, buf: *[512]u8) ?[]const u8 {
+    if (path.len == 0) return null;
+    if (path[0] == '/') return normPath(path, buf);
+    const cwd = process.cwdSlice(process.current());
+
+    var tmp: [512]u8 = undefined;
+    const jlen = cwd.len + 1 + path.len;
+    if (jlen >= tmp.len) return null;
+    @memcpy(tmp[0..cwd.len], cwd);
+    tmp[cwd.len] = '/';
+    @memcpy(tmp[cwd.len + 1 .. cwd.len + 1 + path.len], path);
+    return normPath(tmp[0..jlen], buf);
+}
+
+
 fn sysWrite(fd: usize, buf_ptr: usize, count: usize) isize {
     const fds = fdTable();
     if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
@@ -105,7 +161,8 @@ fn sysRead(fd: usize, buf_ptr: usize, count: usize) isize {
 }
 
 fn sysOpen(path_ptr: usize, flags: usize) isize {
-    const path = cstr(path_ptr);
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
     const node = vfs.resolve(path) catch |e| blk: {
         if (e == error.NotFound and (flags & O_CREAT) != 0) {
             break :blk vfs.create(path, .file) catch |ce| return errnoFor(ce);
@@ -118,6 +175,7 @@ fn sysOpen(path_ptr: usize, flags: usize) isize {
     fdTable()[fd] = .{ .node = node, .offset = start, .used = true };
     return @intCast(fd);
 }
+
 
 fn sysClose(fd: usize) isize {
     const fds = fdTable();
@@ -182,9 +240,12 @@ fn sysLseek(fd: usize, offset: usize, whence: usize) isize {
 }
 
 fn sysMkdir(path_ptr: usize) isize {
-    _ = vfs.mkdir(cstr(path_ptr)) catch |e| return errnoFor(e);
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    _ = vfs.mkdir(path) catch |e| return errnoFor(e);
     return 0;
 }
+
 
 // Linux dirent type values.
 const DT_CHR: u8 = 2;
@@ -251,8 +312,10 @@ fn sysBrk(addr: usize) isize {
 /// spawn(path, argv): convenience for a blocking run — create a child process
 /// from the image and wait for it. Returns its exit code.
 fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
-    const path = cstr(path_ptr);
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
     const node = vfs.resolve(path) catch |e| return errnoFor(e);
+
     if (node.kind != .file) return -EINVAL;
     const image = node.data[0..node.size];
 
@@ -282,6 +345,31 @@ fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
     return @intCast((status >> 8) & 0xFF);
 }
 
+/// chdir(): set the current working directory. Resolves relative paths.
+fn sysChdir(path_ptr: usize) isize {
+    const p = process.current();
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    const node = vfs.resolve(path) catch return -ENOENT;
+    if (node.kind != .dir) return -ENOTDIR;
+    if (path.len > p.cwd.len - 1) return -ENAMETOOLONG;
+    @memcpy(p.cwd[0..path.len], path);
+    p.cwd_len = path.len;
+    return 0;
+}
+
+/// getcwd(): copy the current working directory (null-terminated) into the
+/// user buffer. Returns the length including the null byte, or negative errno.
+fn sysGetcwd(buf_ptr: usize, size: usize) isize {
+    const cwd = process.cwdSlice(process.current());
+    if (cwd.len + 1 > size) return -ERANGE;
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    @memcpy(buf[0..cwd.len], cwd);
+    buf[cwd.len] = 0;
+    return @intCast(cwd.len + 1);
+}
+
+
 /// Central dispatcher, invoked from the SYSCALL handler with a saved trap frame.
 /// Returns the value to place in the caller's rax (exit/execve do not return).
 pub fn handle(tf: *usermode.TrapFrame) isize {
@@ -298,7 +386,12 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_brk => sysBrk(a1),
         SYS_getpid => @intCast(process.current().pid),
         SYS_fork => process.fork(tf),
-        SYS_execve => process.exec(cstr(a1), a2),
+        SYS_execve => blk: {
+            var pbuf: [512]u8 = undefined;
+            const path = toAbsPath(cstr(a1), &pbuf) orelse break :blk -EINVAL;
+            break :blk process.exec(path, a2);
+        },
+
         SYS_exit => process.exit(@bitCast(@as(u32, @truncate(a1)))),
         SYS_wait4 => process.wait4(@bitCast(a1), a2, a3),
         SYS_mkdir => sysMkdir(a1),
@@ -306,6 +399,9 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_dup2 => sysDup2(a1, a2),
         SYS_getdents64 => sysGetdents64(a1, a2, a3),
         SYS_spawn => sysSpawn(a1, a2),
+        SYS_getcwd => sysGetcwd(a1, a2),
+        SYS_chdir => sysChdir(a1),
+        SYS_uptime => @bitCast(pit.jiffies),
         else => -ENOSYS,
     };
 }

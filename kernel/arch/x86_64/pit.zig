@@ -23,3 +23,11 @@ pub fn init(hz: u32) void {
     outb(CH0_DATA, @intCast(divisor & 0xFF));
     outb(CH0_DATA, @intCast((divisor >> 8) & 0xFF));
 }
+
+/// Ticks since boot (incremented by IRQ0 at `hz` Hz).
+pub var jiffies: u64 = 0;
+
+/// Called from the IRQ0 handler every timer interrupt.
+pub fn tick() void {
+    jiffies += 1;
+}

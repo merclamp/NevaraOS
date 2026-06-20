@@ -40,6 +40,11 @@ pub const Process = struct {
     brk: usize = 0,
     fds: [MAX_FD]File = .{File{}} ** MAX_FD,
 
+    // Current working directory (absolute path, kernel-owned buffer).
+    cwd: [256]u8 = [_]u8{'/'} ++ [_]u8{0} ** 255,
+    cwd_len: usize = 1,
+
+
     start: StartKind = .kernel,
     image: []const u8 = &.{},
     argv: [MAX_ARGS][ARG_LEN]u8 = undefined,
@@ -66,6 +71,12 @@ pub fn current() *Process {
     }
     return &procs[0]; // bootstrap/kernel process
 }
+
+/// Absolute path of the current working directory as a slice.
+pub fn cwdSlice(self: *const Process) []const u8 {
+    return self.cwd[0..self.cwd_len];
+}
+
 
 /// Register the kernel (kmain) context as the first process and set up stdio.
 pub fn init() void {
@@ -136,9 +147,12 @@ pub fn spawnImage(image: []const u8, args: []const []const u8) i32 {
         .cr3 = cr3,
         .brk = 0,
         .fds = parent.fds,
+        .cwd = parent.cwd,
+        .cwd_len = parent.cwd_len,
         .start = .run_image,
         .image = image,
     };
+
     copyArgs(p, args);
 
     const t = sched.spawn(imageEntry) catch {
@@ -166,6 +180,8 @@ pub fn fork(tf: *const usermode.TrapFrame) isize {
         .cr3 = cr3,
         .brk = parent.brk,
         .fds = parent.fds,
+        .cwd = parent.cwd,
+        .cwd_len = parent.cwd_len,
         .start = .fork_resume,
     };
     // Bump the pipe writers count for every write-end fd inherited by the child.

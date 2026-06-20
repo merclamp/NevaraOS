@@ -261,11 +261,26 @@ fn installBinaries() void {
     install("/bin/init", @embedFile("init_elf"));
     const nevbox = @embedFile("nevbox_elf");
     install("/bin/nevbox", nevbox);
-    install("/bin/echo", nevbox);
-    install("/bin/cat", nevbox);
-    install("/bin/ls", nevbox);
+    // original applets
+    install("/bin/echo",   nevbox);
+    install("/bin/cat",    nevbox);
+    install("/bin/ls",     nevbox);
     install("/bin/mkfile", nevbox);
-    install("/bin/mkdir", nevbox);
+    install("/bin/mkdir",  nevbox);
+    // new applets
+    install("/bin/wc",     nevbox);
+    install("/bin/grep",   nevbox);
+    install("/bin/head",   nevbox);
+    install("/bin/tail",   nevbox);
+    install("/bin/cp",     nevbox);
+    install("/bin/touch",  nevbox);
+    install("/bin/seq",    nevbox);
+    install("/bin/tee",    nevbox);
+    install("/bin/true",   nevbox);
+    install("/bin/false",  nevbox);
+    install("/bin/uptime",   nevbox);
+    install("/bin/uname",    nevbox);
+    install("/bin/nevfetch", nevbox);
 }
 
 fn install(path: []const u8, bytes: []const u8) void {

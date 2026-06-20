@@ -48,14 +48,17 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
   C library (**ZLibc**) — all written in Zig, no external libc.
 - An interactive shell (**nsh**) with pipelines (`cmd1 | cmd2`), I/O redirection
-  (`> file`, `>> file`, `< file`), and background jobs (`cmd &`).
-
+  (`> file`, `>> file`, `< file`), background jobs (`cmd &`), and a `cd` builtin
+  with a cwd-aware prompt (`nevara:/etc$`).
 - Reads and writes a real disk: **FAT16** at `/mnt` (subdirectories, mkfile,
   mkdir) interoperable with fsck.fat / mtools; **ext4** at `/ext` (read-only).
+- **18 NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
+  `touch` `mkfile` `mkdir` `seq` `tee` `true` `false` `uptime` `uname`
+  `nevfetch` — all in one multi-call binary, no libc.
 
 ## Current status
 
-Ten foundational stages are done and verified in QEMU:
+Eleven foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -91,11 +94,25 @@ Ten foundational stages are done and verified in QEMU:
   counting (`pipe`/`dup2`/close-on-exec); **nsh** parses `|`, `>`, `>>`, `<`
   and runs multi-stage pipelines: `echo hi | cat`, `ls | cat | cat`,
   `cat < file`, `echo text > file`.
+- ✅ **Working directory & relative paths** — every process tracks its own cwd
+  (`chdir`/`getcwd` syscalls, Linux numbers 80/79). All path-taking syscalls
+  (`open`, `mkdir`, `execve`, …) resolve relative paths against the cwd with
+  full `.`/`..` normalisation. **nsh** has a `cd` builtin and shows the current
+  path in its prompt (`nevara:/etc$`).
+- ✅ **Rich userland tooling** — **NevBox** grows to 18 applets: the classic
+  coreutils set (`echo`, `cat`, `ls`, `cp`, `touch`, `mkdir`, `mkfile`, `seq`,
+  `tee`, `true`, `false`) plus text-processing (`wc`, `grep`, `head`, `tail`)
+  and system-info tools (`uptime`, `uname`, `nevfetch`). The PIT exports a
+  100 Hz `jiffies` counter (`SYS_uptime = 1001`) so `uptime` and `nevfetch`
+  can show real elapsed time. `nevfetch` renders a side-by-side ASCII-art `N`
+  logo with OS/kernel/uptime/shell/CPU info and a 16-colour palette.
+
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **More userland** — more NevBox applets (wc, grep, head), a richer ZLibc.
+- ⏳ **More userland** — additional NevBox applets (`sort`, `uniq`, `find`, …),
+  a richer ZLibc (`printf`, `scanf`, …).
 - ⏳ **Polish** — networking, a native filesystem, users & permissions, a
   package manager, and more.
 
@@ -170,27 +187,34 @@ the serial port (COM1) for debugging.
   alignment.
 
 **Processes & scheduling.** Every process owns an address space, a file-
-descriptor table, a program break, and a kernel thread the scheduler time-slices.
-Each thread keeps its own kernel stack; the scheduler re-points TSS.rsp0 and the
-SYSCALL stack on every switch so concurrent ring-3 processes trap onto their own
-stacks, and it reloads CR3 so preemption lands in the right address space.
-`context_switch` (assembly) saves the callee-saved registers and RFLAGS, so the
-interrupt flag is per-thread. The 8259 PIC is remapped to vectors 0x20-0x2F and
-the PIT fires IRQ0 at 100 Hz to drive round-robin preemption.
+descriptor table, a program break, a **current working directory** (256-byte
+kernel buffer, inherited across `fork`/`execve`), and a kernel thread the
+scheduler time-slices. Each thread keeps its own kernel stack; the scheduler
+re-points TSS.rsp0 and the SYSCALL stack on every switch so concurrent ring-3
+processes trap onto their own stacks, and it reloads CR3 so preemption lands in
+the right address space. `context_switch` (assembly) saves the callee-saved
+registers and RFLAGS, so the interrupt flag is per-thread. The 8259 PIC is
+remapped to vectors 0x20-0x2F and the PIT fires IRQ0 at 100 Hz to drive
+round-robin preemption; each IRQ0 also increments `pit.jiffies` (a `pub var
+u64` in `pit.zig`) for uptime tracking.
 
 **Filesystem & system calls.** A virtual filesystem layer backs an in-memory
 (tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
-is supported too: an ATA (IDE) PIO block driver (`ata.zig`) addresses two IDE
-disks (master and slave). A FAT16 driver (`fat.zig`) mounts at `/mnt`: it parses
-an existing volume's BPB or formats a fresh 16 MiB one, supports nested
-subdirectories (cluster chains + dot/dotdot entries), reads/writes files lazily
-through VFS nodes, and produces genuine FAT16 images that round-trip with host
-tools. A read-only ext4 driver (`ext4.zig`) mounts at `/ext`: it reads the
-superblock, block-group descriptors, inodes, and extent trees, and presents files
-and subdirectories through the same VFS. On top sits a per-process
-file-descriptor table and a dispatcher keyed by the Linux x86_64 syscall numbers
-(read, write, open, close, lseek, getpid, brk, mkdir, getdents64, ...), returning
-negative errno on failure.
+`/dev/zero`, `/dev/console`). An ATA (IDE) PIO block driver (`ata.zig`)
+addresses two IDE disks (master and slave). A FAT16 driver (`fat.zig`) mounts
+at `/mnt`: it parses an existing volume's BPB or formats a fresh 16 MiB one,
+supports nested subdirectories (cluster chains + dot/dotdot entries),
+reads/writes files lazily through VFS nodes, and produces genuine FAT16 images
+that round-trip with host tools. A read-only ext4 driver (`ext4.zig`) mounts at
+`/ext`: it reads the superblock, block-group descriptors, inodes, and extent
+trees, and presents files and subdirectories through the same VFS. On top sits a
+per-process file-descriptor table and a dispatcher keyed by the Linux x86_64
+syscall numbers (read, write, open, close, lseek, getpid, brk, fork, execve,
+exit, wait4, mkdir, pipe, dup2, getdents64, **chdir=80, getcwd=79**,
+spawn=1000, **uptime=1001**), returning negative errno on failure. All
+path-taking syscalls resolve relative paths against the current process's cwd
+via an internal `toAbsPath` helper that joins and normalises with `.`/`..`
+collapsing.
 
 **Input & TTY.** A PS/2 keyboard driver (`kbd.zig`) is wired to IRQ1: it reads
 scancodes from port 0x60, tracks Shift/Ctrl/Caps Lock, decodes the 0xE0 extended
@@ -210,11 +234,15 @@ the kernel half), so every program links at the same fixed high base without
 colliding. The process syscalls are real: `fork` deep-copies the caller's user
 pages, `execve` swaps in a new image, `wait4`/`waitpid` reap a zombie child (with
 WNOHANG), and `exit` turns a process into a zombie until its parent reaps it.
-Userland is built on two Zig runtimes — **nstd** (native, libc-free) and
-**ZLibc** (a small C library compiled by `zig cc`); on top sit **ZInit** (PID 1,
-a getty-style supervisor that respawns the shell), **nsh** (the interactive REPL,
-which runs commands as fork + execve + wait and supports `&` background jobs), and
-**NevBox** (a multi-call coreutils binary installed under `echo`/`cat`/`ls`).
+Userland is built on two Zig runtimes — **nstd** (native, libc-free; wraps
+read/write/open/close/lseek/fork/execve/waitpid/pipe/dup2/mkdir/chdir/getcwd/
+uptimeTicks and a bump allocator over `brk`) and **ZLibc** (a small C library
+compiled by `zig cc`); on top sit **ZInit** (PID 1, a getty-style supervisor
+that respawns the shell), **nsh** (the interactive REPL, which runs commands as
+fork + execve + wait, supports `&` background jobs, and has a `cd` builtin with
+a cwd-in-prompt display), and **NevBox** (a multi-call coreutils binary with 18
+applets: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp` `touch` `mkfile`
+`mkdir` `seq` `tee` `true` `false` `uptime` `uname` `nevfetch`).
 
 **Source layout.**
 
@@ -225,17 +253,18 @@ kernel/
   main.zig           kernel entry point
   tty.zig            TTY line discipline (in-line editing + history)
   font.zig           bitmap font (public domain)
-  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal, PS/2 keyboard, ATA
+  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal,
+                     PS/2 keyboard, ATA, PIT (jiffies counter)
   mm/                pmm, vmm, heap
-  proc/              scheduler, kernel threads, and the process model
+  proc/              scheduler, kernel threads, and the process model (+ cwd)
   fs/                VFS (in-memory tmpfs + devices), FAT16, and ext4 drivers
-  syscall/           file descriptors and the syscall dispatcher
+  syscall/           file descriptors, path resolution, and the syscall dispatcher
   exec/elf.zig       ELF64 loader
   lib/c.zig          freestanding mem builtins
 user/
   nstd/              native libc-free Zig runtime
-  init.zig, zinit/    first program and the init system (PID 1, getty-style)
-  nevbox/            multi-call coreutils utility (echo/cat/ls)
-  nsh/               the interactive shell (REPL)
+  init.zig, zinit/   first program and the init system (PID 1, getty-style)
+  nevbox/            multi-call coreutils utility (18 applets)
+  nsh/               the interactive shell (REPL + cd builtin)
 zlibc/               our own C library (Zig) + headers
 ```
