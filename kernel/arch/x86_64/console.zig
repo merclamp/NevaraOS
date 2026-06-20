@@ -16,7 +16,26 @@ pub fn useFramebuffer(framebuffer: fb.Framebuffer) bool {
     return fb.init(framebuffer);
 }
 
-pub fn writeByte(c: u8) void {
+/// Save the interrupt flag and disable interrupts. Console output touches
+/// shared framebuffer state (cursor position, escape-parser state, the cell
+/// grid), so a timer preemption landing mid-write would corrupt it. Making each
+/// write atomic w.r.t. interrupts keeps concurrent threads from clobbering it.
+inline fn irqSave() u64 {
+    return asm volatile (
+        \\ pushfq
+        \\ popq %[flags]
+        \\ cli
+        : [flags] "=r" (-> u64),
+        :
+        : .{ .memory = true });
+}
+
+inline fn irqRestore(flags: u64) void {
+    if (flags & 0x200 != 0) asm volatile ("sti" ::: .{ .memory = true });
+}
+
+/// Emit one byte to every sink. Caller must hold the interrupt guard.
+fn rawByte(c: u8) void {
     if (c == '\n') {
         serial.writeByte('\r');
         serial.writeByte('\n');
@@ -26,8 +45,16 @@ pub fn writeByte(c: u8) void {
     fb.putChar(c);
 }
 
+pub fn writeByte(c: u8) void {
+    const flags = irqSave();
+    defer irqRestore(flags);
+    rawByte(c);
+}
+
 pub fn writeString(s: []const u8) void {
-    for (s) |c| writeByte(c);
+    const flags = irqSave();
+    defer irqRestore(flags);
+    for (s) |c| rawByte(c);
 }
 
 /// Write a 64-bit value as `0x` + 16 hex digits.

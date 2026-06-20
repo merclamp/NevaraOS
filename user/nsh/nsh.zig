@@ -23,10 +23,10 @@ var path: [288]u8 = undefined;
 var argv: [MAX_ARGS + 1]?[*:0]const u8 = undefined;
 
 pub fn main() void {
-    nstd.print("\nNevara shell (nsh) - type 'help' or 'exit'\n");
+    nstd.print("\n\x1b[1;36mNevara shell (nsh)\x1b[0m - type 'help' or 'exit'\n");
 
     while (true) {
-        nstd.print("nevara$ ");
+        nstd.print("\x1b[1;32mnevara$\x1b[0m ");
         const n = nstd.read(0, line[0 .. line.len - 1]);
         if (n == 0) continue;
 
@@ -43,6 +43,8 @@ pub fn main() void {
         if (std.mem.eql(u8, cmd, "help")) {
             nstd.print("builtins: help, exit\n");
             nstd.print("programs in /bin: nevbox, echo, cat, ls, hello\n");
+            nstd.print("line editing: \x1b[33m<-/->\x1b[0m move, Home/End, Del,\n");
+            nstd.print("  Ctrl-A/E/U/K/W, Up/Down history, Ctrl-L clear\n");
             continue;
         }
 

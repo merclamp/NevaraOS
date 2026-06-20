@@ -41,7 +41,8 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 
 - Written entirely in Zig, with an explicit, no-surprises design.
 - Boots on standard PCs via GRUB.
-- Its own graphical text console (1024×768) — readable on a real monitor.
+- Its own framebuffer terminal (1024×768) with ANSI colours, a block cursor, and
+  Linux-style line editing — arrow keys, history, and the usual Ctrl shortcuts.
 - A clean, modular kernel where every piece is meant to be understandable.
 - Runs real ring-3 programs from a built-in ELF loader, including an init
   system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
@@ -65,10 +66,13 @@ Six foundational stages are done and verified in QEMU:
 - ✅ **Userspace & init** — ring 3 with a `syscall` entry, an ELF loader,
   isolated per-process address spaces, the ZLibc/nstd runtimes, and **ZInit**
   (PID 1) launching **NevBox** applets and C programs.
-- ✅ **Interactive shell & input** — a PS/2 keyboard driver (scancode set 1,
-  shift, ring buffer) feeds `/dev/console`, and **nsh** is a REPL that parses a
-  line into argv and spawns `/bin/<cmd>` as an isolated child. **ZInit** now
-  supervises it getty-style, respawning the shell whenever it exits.
+- ✅ **Interactive shell & TTY** — a PS/2 keyboard driver (scancode set 1, with
+  Shift, Ctrl, Caps Lock, and the 0xE0 extended keys) feeds a real line
+  discipline: an in-line cursor with insert/delete (arrows, Home/End, Delete,
+  backspace), word/line kills (Ctrl-A/E/U/K/W/L), and command history (Up/Down).
+  The framebuffer is an ANSI/VT100 terminal (16 colours, block cursor, cursor
+  and erase escapes). **nsh** reads a line, parses argv, and spawns `/bin/<cmd>`;
+  **ZInit** supervises it getty-style, respawning the shell whenever it exits.
 
 ## Roadmap
 
@@ -134,8 +138,12 @@ provides its own `memcpy`/`memmove`/`memset`/`memcmp` since compiler-rt is not
 linked in.
 
 **Display.** The kernel requests a linear RGB framebuffer (1024×768×32) via the
-Multiboot2 header and renders text with a scaled public-domain 8×8 bitmap font.
-All output is mirrored to the serial port (COM1) for debugging.
+Multiboot2 header and drives it as a small ANSI/VT100 terminal: a colour cell
+grid rendered with a public-domain 8×8 bitmap font (native size), a block
+cursor, and a CSI escape parser (cursor movement, line/screen erase, and SGR
+16-colour attributes). Console writes briefly disable interrupts so a timer
+preemption can't corrupt the shared terminal state. All output is mirrored to
+the serial port (COM1) for debugging.
 
 **Memory management.**
 
@@ -163,11 +171,15 @@ dispatcher keyed by the Linux x86_64
 syscall numbers (read, write, open, close, lseek, getpid, brk, mkdir,
 getdents64, ...), returning negative errno on failure.
 
-**Input.** A PS/2 keyboard driver (`kbd.zig`) is wired to IRQ1: it reads
-scancodes from port 0x60, translates set-1 make/break codes to ASCII (honoring
-shift), and pushes them into a 256-byte ring. `/dev/console`'s read side drains
-that ring with a canonical line read (echo, backspace, Enter). The keyboard IRQ
-is unmasked just before ZInit starts.
+**Input & TTY.** A PS/2 keyboard driver (`kbd.zig`) is wired to IRQ1: it reads
+scancodes from port 0x60, tracks Shift/Ctrl/Caps Lock, decodes the 0xE0 extended
+set (arrows, Home/End, Delete, ...), and pushes a byte stream — ASCII, control
+codes, and VT100 escape sequences — into a 256-byte ring, exactly the way a
+terminal feeds an application. The line discipline (`tty.zig`) drains it and
+implements canonical-mode editing: an in-line cursor with insert/delete,
+word/line kills, and command history, all echoed through the escape sequences the
+framebuffer terminal understands. `/dev/console`'s read side returns one
+completed line. The keyboard IRQ is unmasked just before ZInit starts.
 
 **Userspace.** Ring 3 is entered via `iretq`; user programs trap into the kernel
 with the `syscall` instruction (SYSCALL/SYSRET MSRs configured). An ELF64 loader
@@ -188,8 +200,9 @@ build.zig            build, ISO, and QEMU run steps
 boot/grub/           GRUB configuration
 kernel/
   main.zig           kernel entry point
+  tty.zig            TTY line discipline (in-line editing + history)
   font.zig           bitmap font (public domain)
-  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer, console, PS/2 keyboard
+  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal, PS/2 keyboard
   mm/                pmm, vmm, heap
   proc/              scheduler and kernel threads
   fs/                virtual filesystem (in-memory tmpfs + devices)

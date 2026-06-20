@@ -9,7 +9,7 @@
 const std = @import("std");
 const heap = @import("../mm/heap.zig");
 const console = @import("../arch/x86_64/console.zig");
-const kbd = @import("../arch/x86_64/kbd.zig");
+const tty = @import("../tty.zig");
 
 pub const Error = error{
     NotFound,
@@ -193,7 +193,7 @@ fn consoleWrite(buf: []const u8) usize {
     return buf.len;
 }
 fn consoleRead(buf: []u8) usize {
-    return kbd.readLine(buf);
+    return tty.readLine(buf);
 }
 const console_ops = DevOps{ .read = consoleRead, .write = consoleWrite };
 

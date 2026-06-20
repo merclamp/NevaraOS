@@ -39,7 +39,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
 
     console.writeString("\n");
     console.writeString("======================================\n");
-    console.writeString("  Nevara OS  -  kernel\n");
+    console.writeString("  \x1b[1;36mNevara OS\x1b[0m  -  kernel\n");
     console.writeString("======================================\n");
     console.writeString("[boot] reached 64-bit long mode via GRUB/Multiboot2\n");
     if (have_fb) {
