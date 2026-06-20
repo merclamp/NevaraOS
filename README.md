@@ -46,7 +46,7 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 
 ## Current status
 
-Two foundational stages are done and verified in QEMU:
+Four foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -55,13 +55,13 @@ Two foundational stages are done and verified in QEMU:
   (page tables), and provides a growing kernel heap.
 - ✅ **Processes & scheduling** — kernel threads with context switching and a
   preemptive, timer-driven round-robin scheduler.
+- ✅ **Filesystem & system calls** — an in-memory filesystem (files, directories,
+  devices) and a Linux-compatible system call layer.
 
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Filesystem & system calls** — a virtual filesystem layer and the first
-  Linux-compatible system calls.
 - ⏳ **Userland** — loading and running real programs, an init system, a shell.
 - ⏳ **Real filesystems** — reading and writing actual disks.
 - ⏳ **Linux compatibility** — running unmodified Linux programs.
@@ -134,6 +134,14 @@ remapped to vectors 0x20-0x2F and the PIT fires IRQ0 at 100 Hz; the timer
 handler acknowledges the interrupt and round-robins to the next ready thread.
 Cooperative `yield()` uses the same switch primitive.
 
+**Filesystem & system calls.** A virtual filesystem layer backs an in-memory
+(tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
+`/dev/zero`, `/dev/console`); files grow their buffers from the heap. On top sits
+a per-task file-descriptor table and a dispatcher keyed by the Linux x86_64
+syscall numbers (read, write, open, close, lseek, getpid, mkdir, ...), returning
+negative errno on failure. The ring-3 `syscall`-instruction entry arrives with
+userspace; for now the dispatcher is driven directly.
+
 **Source layout.**
 
 ```
@@ -145,5 +153,7 @@ kernel/
   arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer, console
   mm/                pmm, vmm, heap
   proc/              scheduler and kernel threads
+  fs/                virtual filesystem (in-memory tmpfs + devices)
+  syscall/           file descriptors and the syscall dispatcher
   lib/c.zig          freestanding mem builtins
 ```
