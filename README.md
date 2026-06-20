@@ -1,9 +1,9 @@
 # Nevara OS
 
 > ⚠️ **Status: early development.** Nevara OS is a hobby operating system being
-> built from scratch. It is **not** usable as a daily system yet — right now it
-> boots, sets up the CPU, manages memory, and prints to the screen. Expect
-> breaking changes, rewrites, and rough edges.
+> built from scratch. It is **not usable as a daily system yet** — right now it
+> boots, sets up the CPU, manages memory, and drops into an interactive shell
+> driven by a PS/2 keyboard. Expect breaking changes, rewrites, and rough edges.
 
 🇬🇧 English · [🇷🇺 Русский](README.ru.md)
 
@@ -46,10 +46,12 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 - Runs real ring-3 programs from a built-in ELF loader, including an init
   system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
   C library (**ZLibc**) — all written in Zig, no external libc.
+- An interactive shell (**nsh**) fed by a PS/2 keyboard through `/dev/console`,
+  launching BusyBox-style applets (`echo`, `cat`, `ls`) on demand.
 
 ## Current status
 
-Five foundational stages are done and verified in QEMU:
+Six foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -63,6 +65,10 @@ Five foundational stages are done and verified in QEMU:
 - ✅ **Userspace & init** — ring 3 with a `syscall` entry, an ELF loader,
   isolated per-process address spaces, the ZLibc/nstd runtimes, and **ZInit**
   (PID 1) launching **NevBox** applets and C programs.
+- ✅ **Interactive shell & input** — a PS/2 keyboard driver (scancode set 1,
+  shift, ring buffer) feeds `/dev/console`, and **nsh** is a REPL that parses a
+  line into argv and spawns `/bin/<cmd>` as an isolated child. **ZInit** now
+  supervises it getty-style, respawning the shell whenever it exits.
 
 ## Roadmap
 
@@ -71,7 +77,8 @@ What still needs to be built (roughly in order):
 - ⏳ **Concurrent multitasking** — running several user processes at once
   (`fork`/`exec`/`wait`); process spawning is synchronous for now.
 - ⏳ **Real filesystems** — reading and writing actual disks.
-- ⏳ **More userland** — a shell, more NevBox applets, a richer ZLibc.
+- ⏳ **More userland** — more NevBox applets, a richer ZLibc, pipes and
+  redirection in nsh.
 - ⏳ **Polish** — networking, a native filesystem, users & permissions, a
   package manager, and more.
 
@@ -90,6 +97,13 @@ zig build run      # build and boot it in QEMU
 
 You can also boot `zig-out/nevara.iso` in VirtualBox, virt-manager, or on real
 hardware. Use a BIOS or UEFI machine with a standard VGA/QXL/virtio display.
+
+`zig build run` launches QEMU with `-serial stdio`, so the boot log and shell
+output are mirrored to your terminal, while the framebuffer console is shown in
+the QEMU window. **Type into the QEMU window** to interact with `nsh` — input
+is the emulated PS/2 keyboard, not the serial port. Before the shell appears,
+the kernel prints a short run of self-tests (PMM, VMM, heap, scheduler, VFS,
+syscalls) as a boot-time sanity check.
 
 ## Technical details
 
@@ -144,9 +158,16 @@ Cooperative `yield()` uses the same switch primitive.
 **Filesystem & system calls.** A virtual filesystem layer backs an in-memory
 (tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
 `/dev/zero`, `/dev/console`); files grow their buffers from the heap. On top sits
-a per-task file-descriptor table and a dispatcher keyed by the Linux x86_64
+a file-descriptor table (a single global one for now, per-process later) and a
+dispatcher keyed by the Linux x86_64
 syscall numbers (read, write, open, close, lseek, getpid, brk, mkdir,
 getdents64, ...), returning negative errno on failure.
+
+**Input.** A PS/2 keyboard driver (`kbd.zig`) is wired to IRQ1: it reads
+scancodes from port 0x60, translates set-1 make/break codes to ASCII (honoring
+shift), and pushes them into a 256-byte ring. `/dev/console`'s read side drains
+that ring with a canonical line read (echo, backspace, Enter). The keyboard IRQ
+is unmasked just before ZInit starts.
 
 **Userspace.** Ring 3 is entered via `iretq`; user programs trap into the kernel
 with the `syscall` instruction (SYSCALL/SYSRET MSRs configured). An ELF64 loader
@@ -156,7 +177,9 @@ high base without colliding. `spawn(path, argv)` loads a binary from the VFS and
 runs it as an isolated process, returning its exit code (synchronous for now).
 Userland is built on two Zig runtimes — **nstd** (native, libc-free) and
 **ZLibc** (a small C library compiled by `zig cc`); on top of them sit **ZInit**
-(PID 1) and **NevBox** (a multi-call coreutils binary).
+(PID 1, a getty-style supervisor that respawns the shell), **nsh** (the
+interactive REPL), and **NevBox** (a multi-call coreutils binary installed under
+`echo`/`cat`/`ls`).
 
 **Source layout.**
 
@@ -166,7 +189,7 @@ boot/grub/           GRUB configuration
 kernel/
   main.zig           kernel entry point
   font.zig           bitmap font (public domain)
-  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer, console
+  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer, console, PS/2 keyboard
   mm/                pmm, vmm, heap
   proc/              scheduler and kernel threads
   fs/                virtual filesystem (in-memory tmpfs + devices)
@@ -175,7 +198,8 @@ kernel/
   lib/c.zig          freestanding mem builtins
 user/
   nstd/              native libc-free Zig runtime
-  init.zig, zinit/    first program and the init system (PID 1)
-  nevbox/            multi-call coreutils utility
+  init.zig, zinit/    first program and the init system (PID 1, getty-style)
+  nevbox/            multi-call coreutils utility (echo/cat/ls)
+  nsh/               the interactive shell (REPL)
 zlibc/               our own C library (Zig) + headers
 ```
