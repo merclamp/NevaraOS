@@ -12,6 +12,8 @@ const heap = @import("mm/heap.zig");
 const sched = @import("proc/sched.zig");
 const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
+const vfs = @import("fs/vfs.zig");
+const syscall = @import("syscall/syscall.zig");
 
 comptime {
     _ = @import("lib/c.zig"); // export memcpy/memmove/memset/memcmp
@@ -64,6 +66,8 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         testHeap();
         testSched();
         testPreempt();
+        testVfs();
+        testSyscall();
     } else {
         console.writeString("[mb2] skipping memory map (not multiboot2-booted)\n");
     }
@@ -214,7 +218,7 @@ fn busyWorker(comptime tag: []const u8, comptime chunks: usize) fn () void {
             while (c < chunks) : (c += 1) {
                 // Burn time so a few timer ticks land inside this chunk.
                 var spin: usize = 0;
-                while (spin < 40_000_000) : (spin += 1) {
+                while (spin < 5_000_000) : (spin += 1) {
                     asm volatile ("" ::: .{ .memory = true });
                 }
                 console.writeString("    [" ++ tag ++ "] chunk\n");
@@ -243,6 +247,92 @@ fn testPreempt() void {
     console.writeString("[sched] preemptive test done, ticks=");
     console.writeDec(sched.ticks);
     console.writeString("\n");
+}
+
+/// Exercise the in-memory VFS: directories, files, devices, and path lookup.
+fn testVfs() void {
+    vfs.init() catch {
+        console.writeString("[vfs] init failed\n");
+        return;
+    };
+    console.writeString("[vfs] mounted in-memory root with /dev\n");
+
+    _ = vfs.mkdir("/etc") catch return;
+    const f = vfs.create("/etc/hostname", .file) catch return;
+    _ = vfs.writeAt(f, "nevara\n", 0) catch return;
+
+    var buf: [64]u8 = undefined;
+    const node = vfs.resolve("/etc/hostname") catch return;
+    const n = vfs.readAt(node, &buf, 0) catch return;
+    console.writeString("[vfs] /etc/hostname -> \"");
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (buf[i] == '\n') break;
+        console.writeByte(buf[i]);
+    }
+    console.writeString("\" (");
+    console.writeDec(node.size);
+    console.writeString(" bytes)\n");
+
+    // Directory listing of /
+    console.writeString("[vfs] ls / :");
+    var idx: usize = 0;
+    while (vfs.readdir(vfs.root(), idx)) |child| : (idx += 1) {
+        console.writeString(" ");
+        console.writeString(child.name);
+        if (child.kind == .dir) console.writeString("/");
+    }
+    console.writeString("\n");
+
+    // /dev/zero yields zeros; /dev/null swallows writes.
+    var zbuf: [8]u8 = .{ 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
+    const zn = vfs.resolve("/dev/zero") catch return;
+    _ = vfs.readAt(zn, &zbuf, 0) catch return;
+    const nn = vfs.resolve("/dev/null") catch return;
+    const wrote = vfs.writeAt(nn, "discarded", 0) catch return;
+    console.writeString("[vfs] /dev/zero[0]=");
+    console.writeDec(zbuf[0]);
+    console.writeString(", /dev/null wrote=");
+    console.writeDec(wrote);
+    console.writeString("\n");
+}
+
+/// Drive the syscall layer the way userspace will: Linux numbers + arguments.
+fn testSyscall() void {
+    syscall.init(); // bind stdin/stdout/stderr to /dev/console
+
+    // write(1, ...) -> console
+    const greeting = "  [syscall] hello from sys_write(1)\n";
+    _ = syscall.dispatch(1, 1, @intFromPtr(greeting.ptr), greeting.len);
+
+    // mkdir("/tmp"); open("/tmp/a", O_CREAT|O_RDWR)
+    _ = syscall.dispatch(83, @intFromPtr("/tmp"), 0, 0);
+    const fd = syscall.dispatch(2, @intFromPtr("/tmp/a"), 0o100 | 2, 0);
+
+    // write payload, seek to start, read it back
+    const payload = "syscall-io";
+    _ = syscall.dispatch(1, @intCast(fd), @intFromPtr(payload.ptr), payload.len);
+    _ = syscall.dispatch(8, @intCast(fd), 0, 0); // lseek SEEK_SET 0
+
+    var buf: [16]u8 = undefined;
+    const got = syscall.dispatch(0, @intCast(fd), @intFromPtr(&buf), payload.len);
+    _ = syscall.dispatch(3, @intCast(fd), 0, 0); // close
+
+    const pid = syscall.dispatch(39, 0, 0, 0); // getpid
+    const bad = syscall.dispatch(2, @intFromPtr("/nope/x"), 2, 0); // ENOENT path
+
+    console.writeString("[syscall] fd=");
+    console.writeDec(@intCast(fd));
+    console.writeString(" read ");
+    console.writeDec(@intCast(got));
+    console.writeString(" bytes \"");
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(got))) : (i += 1) console.writeByte(buf[i]);
+    console.writeString("\" getpid=");
+    console.writeDec(@intCast(pid));
+    console.writeString(", open(bad)=");
+    console.writeDec(@intCast(-bad));
+    console.writeString(" (errno)\n");
 }
 
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the
