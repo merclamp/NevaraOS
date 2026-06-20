@@ -11,6 +11,7 @@ const vmm = @import("mm/vmm.zig");
 const heap = @import("mm/heap.zig");
 const sched = @import("proc/sched.zig");
 const process = @import("proc/process.zig");
+const ata = @import("arch/x86_64/ata.zig");
 const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
@@ -68,6 +69,9 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         heap.init();
         testHeap();
         testVfs();
+        _ = ata.init();
+        vfs.mountFat(); // mount (or format) the FAT16 disk at /mnt
+        writeBootFile();
         usermode.init();
         process.init(); // scheduler + the kernel (kmain) process, stdio bound
         installBinaries();
@@ -259,11 +263,19 @@ fn installBinaries() void {
     install("/bin/echo", nevbox);
     install("/bin/cat", nevbox);
     install("/bin/ls", nevbox);
+    install("/bin/mkfile", nevbox);
 }
 
 fn install(path: []const u8, bytes: []const u8) void {
     const f = vfs.create(path, .file) catch return;
     _ = vfs.writeAt(f, bytes, 0) catch {};
+}
+
+/// Drop a small file on the FAT disk so there is content to read back (and for
+/// the host to verify the on-disk format). Skipped if it already exists.
+fn writeBootFile() void {
+    const f = vfs.create("/mnt/boot.txt", .file) catch return;
+    _ = vfs.writeAt(f, "hello from nevara fat16\n", 0) catch {};
 }
 
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the

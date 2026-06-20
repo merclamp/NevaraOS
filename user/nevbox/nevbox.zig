@@ -36,8 +36,10 @@ pub fn main() void {
         appletCat();
     } else if (std.mem.eql(u8, cmd, "ls")) {
         appletLs();
+    } else if (std.mem.eql(u8, cmd, "mkfile")) {
+        appletMkfile();
     } else {
-        nstd.print("nevbox: applets: echo, cat, ls\n");
+        nstd.print("nevbox: applets: echo, cat, ls, mkfile\n");
     }
 }
 
@@ -48,6 +50,27 @@ fn appletEcho() void {
         nstd.print(a);
     }
     nstd.print("\n");
+}
+
+fn appletMkfile() void {
+    const path = nstd.argZ(1) orelse {
+        nstd.print("usage: mkfile <path> <text...>\n");
+        return;
+    };
+    const fd = nstd.open(path, 0o100 | 0o1000); // O_CREAT | O_TRUNC
+    if (fd < 0) {
+        nstd.print("mkfile: cannot create file\n");
+        return;
+    }
+    var i: usize = 2;
+    var first = true;
+    while (nstd.arg(i)) |a| : (i += 1) {
+        if (!first) _ = nstd.write(@intCast(fd), " ");
+        _ = nstd.write(@intCast(fd), a);
+        first = false;
+    }
+    _ = nstd.write(@intCast(fd), "\n");
+    nstd.close(@intCast(fd));
 }
 
 fn appletCat() void {

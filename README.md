@@ -49,10 +49,12 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   C library (**ZLibc**) — all written in Zig, no external libc.
 - An interactive shell (**nsh**) fed by a PS/2 keyboard through `/dev/console`,
   launching BusyBox-style applets (`echo`, `cat`, `ls`) on demand.
+- Reads and writes a real disk: an ATA driver and a FAT16 filesystem mounted at
+  `/mnt`, interoperable with `fsck.fat` / mtools on the host.
 
 ## Current status
 
-Seven foundational stages are done and verified in QEMU:
+Eight foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -78,12 +80,18 @@ Seven foundational stages are done and verified in QEMU:
   between them, and **nsh** runs commands the Unix way (fork + exec + wait), with
   background jobs via a trailing `&`. The `demo` builtin forks two children whose
   output interleaves to show preemption.
+- ✅ **Real disk storage** — an ATA (IDE) PIO block driver and a **FAT16** driver:
+  the disk mounts at `/mnt` (formatting a fresh one), files read and write through
+  the normal VFS, and they persist across reboots. The on-disk format is genuine
+  FAT16 — images round-trip with `fsck.fat` / mtools on the host. `mkfile` creates
+  files from the shell.
 
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Real filesystems** — reading and writing actual disks.
+- ⏳ **Native filesystem & subdirectories** — FAT subdirectories, then a richer
+  native filesystem.
 - ⏳ **More userland** — more NevBox applets, a richer ZLibc, pipes and
   redirection in nsh.
 - ⏳ **Polish** — networking, a native filesystem, users & permissions, a
@@ -170,10 +178,14 @@ the PIT fires IRQ0 at 100 Hz to drive round-robin preemption.
 
 **Filesystem & system calls.** A virtual filesystem layer backs an in-memory
 (tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
-`/dev/zero`, `/dev/console`); files grow their buffers from the heap. On top sits
-a per-process file-descriptor table and a dispatcher keyed by the Linux x86_64
-syscall numbers (read, write, open, close, lseek, getpid, brk, mkdir,
-getdents64, ...), returning negative errno on failure.
+`/dev/zero`, `/dev/console`); files grow their buffers from the heap. A real disk
+is supported too: an ATA (IDE) PIO block driver (`ata.zig`) under a FAT16 driver
+(`fat.zig`) mounts at `/mnt` — it parses an existing volume's BPB or formats a
+fresh 16 MiB one, and reads/writes files through the same VFS nodes (loaded lazily
+on read, flushed to disk on write). The on-disk layout is genuine FAT16, so images
+round-trip with host tools. On top sits a per-process file-descriptor table and a
+dispatcher keyed by the Linux x86_64 syscall numbers (read, write, open, close,
+lseek, getpid, brk, mkdir, getdents64, ...), returning negative errno on failure.
 
 **Input & TTY.** A PS/2 keyboard driver (`kbd.zig`) is wired to IRQ1: it reads
 scancodes from port 0x60, tracks Shift/Ctrl/Caps Lock, decodes the 0xE0 extended
@@ -208,10 +220,10 @@ kernel/
   main.zig           kernel entry point
   tty.zig            TTY line discipline (in-line editing + history)
   font.zig           bitmap font (public domain)
-  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal, PS/2 keyboard
+  arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal, PS/2 keyboard, ATA
   mm/                pmm, vmm, heap
   proc/              scheduler, kernel threads, and the process model
-  fs/                virtual filesystem (in-memory tmpfs + devices)
+  fs/                VFS (in-memory tmpfs + devices) and the FAT16 disk driver
   syscall/           file descriptors and the syscall dispatcher
   exec/elf.zig       ELF64 loader
   lib/c.zig          freestanding mem builtins

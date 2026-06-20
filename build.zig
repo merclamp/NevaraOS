@@ -228,6 +228,12 @@ pub fn build(b: *std.Build) void {
     iso_step.dependOn(&install_iso.step);
 
     // ---- Run in QEMU ----------------------------------------------------
+    // Create a 16 MiB raw disk the kernel formats as FAT16 on first boot.
+    const mkdisk = b.addSystemCommand(&.{
+        "sh", "-c",
+        "test -f zig-out/disk.img || { mkdir -p zig-out && dd if=/dev/zero of=zig-out/disk.img bs=1M count=16; }",
+    });
+
     const run = b.addSystemCommand(&.{"qemu-system-x86_64"});
     run.addArg("-cdrom");
     run.addFileArg(iso_file);
@@ -236,7 +242,10 @@ pub fn build(b: *std.Build) void {
         "-no-reboot", "-no-shutdown",
         "-m",         "512M",
         "-vga",       "std",
+        "-boot",      "d", // boot from the CD-ROM (the FAT disk is data only)
+        "-drive",     "file=zig-out/disk.img,format=raw,if=ide,index=0,media=disk",
     });
+    run.step.dependOn(&mkdisk.step);
     const run_step = b.step("run", "Boot Nevara OS in QEMU");
     run_step.dependOn(&run.step);
 }

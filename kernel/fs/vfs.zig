@@ -10,6 +10,7 @@ const std = @import("std");
 const heap = @import("../mm/heap.zig");
 const console = @import("../arch/x86_64/console.zig");
 const tty = @import("../tty.zig");
+const fat = @import("fat.zig");
 
 pub const Error = error{
     NotFound,
@@ -44,10 +45,45 @@ pub const Node = struct {
 
     // Character device.
     dev: ?*const DevOps = null,
+
+    // Disk-backed (FAT) file: lazily loaded into `data` on first read, and
+    // written back to disk on every write.
+    on_disk: bool = false,
+    cluster: u16 = 0,
 };
 
 var alloc: std.mem.Allocator = undefined;
 var root_node: *Node = undefined;
+var mount_root: ?*Node = null;
+
+/// Load a disk-backed file's contents into memory on first access.
+fn loadDisk(node: *Node) void {
+    const buf = alloc.alloc(u8, node.size) catch return;
+    _ = fat.readFile(node.cluster, @intCast(node.size), buf);
+    node.data = buf;
+}
+
+/// Callback for fat.forEachRoot: add a disk-backed child node for each file.
+fn addDiskChild(dir: *Node, name: []const u8, cluster: u16, fsize: u32) void {
+    const node = makeNode(.file, name) catch return;
+    node.on_disk = true;
+    node.cluster = cluster;
+    node.size = fsize;
+    addChild(dir, node) catch return;
+}
+
+/// Mount the FAT disk at /mnt (formatting a fresh disk if needed) and populate
+/// it with the files already on disk.
+pub fn mountFat() void {
+    if (!fat.mount()) {
+        console.writeString("[fat] no disk to mount\n");
+        return;
+    }
+    const m = mkdir("/mnt") catch return;
+    mount_root = m;
+    fat.forEachRoot(m, addDiskChild);
+    console.writeString("[fat] /mnt mounted\n");
+}
 
 fn dupName(s: []const u8) Error![]u8 {
     const m = try alloc.alloc(u8, s.len);
@@ -115,6 +151,10 @@ pub fn create(path: []const u8, kind: Kind) Error!*Node {
     if (lookup(parent, parts.name) != null) return Error.Exists;
     const node = try makeNode(kind, parts.name);
     try addChild(parent, node);
+    if (kind == .file and mount_root != null and parent == mount_root.?) {
+        node.on_disk = true;
+        _ = fat.writeFile(node.name, "");
+    }
     return node;
 }
 
@@ -135,6 +175,7 @@ pub fn readAt(node: *Node, buf: []u8, offset: usize) Error!usize {
         .dir => return Error.IsDirectory,
         .chardev => return (node.dev orelse return Error.NotSupported).read(buf),
         .file => {
+            if (node.on_disk and node.data.len == 0 and node.size > 0) loadDisk(node);
             if (offset >= node.size) return 0;
             const n = @min(buf.len, node.size - offset);
             @memcpy(buf[0..n], node.data[offset .. offset + n]);
@@ -160,6 +201,7 @@ pub fn writeAt(node: *Node, buf: []const u8, offset: usize) Error!usize {
             }
             @memcpy(node.data[offset..end], buf);
             if (end > node.size) node.size = end;
+            if (node.on_disk) _ = fat.writeFile(node.name, node.data[0..node.size]);
             return buf.len;
         },
     }
