@@ -63,25 +63,37 @@ fn loadDisk(node: *Node) void {
     node.data = buf;
 }
 
-/// Callback for fat.forEachRoot: add a disk-backed child node for each file.
-fn addDiskChild(dir: *Node, name: []const u8, cluster: u16, fsize: u32) void {
-    const node = makeNode(.file, name) catch return;
-    node.on_disk = true;
-    node.cluster = cluster;
-    node.size = fsize;
-    addChild(dir, node) catch return;
+/// fat.Dir handle for a disk-backed directory node.
+fn fatDirOf(node: *Node) fat.Dir {
+    return .{ .is_root = (mount_root != null and node == mount_root.?), .cluster = node.cluster };
+}
+
+/// Recursively populate `dirnode` from the FAT directory `fdir`.
+fn populate(dirnode: *Node, fdir: fat.Dir) void {
+    var i: usize = 0;
+    while (fat.entryAt(fdir, i)) |e| : (i += 1) {
+        const kind: Kind = if (e.is_dir) .dir else .file;
+        const node = makeNode(kind, e.name[0..e.name_len]) catch return;
+        node.on_disk = true;
+        node.cluster = e.cluster;
+        node.size = e.size;
+        addChild(dirnode, node) catch return;
+        if (e.is_dir) populate(node, .{ .is_root = false, .cluster = e.cluster });
+    }
 }
 
 /// Mount the FAT disk at /mnt (formatting a fresh disk if needed) and populate
-/// it with the files already on disk.
+/// the whole tree (subdirectories included) from what's already on disk.
 pub fn mountFat() void {
     if (!fat.mount()) {
         console.writeString("[fat] no disk to mount\n");
         return;
     }
     const m = mkdir("/mnt") catch return;
+    m.on_disk = true;
+    m.cluster = 0;
     mount_root = m;
-    fat.forEachRoot(m, addDiskChild);
+    populate(m, fat.root());
     console.writeString("[fat] /mnt mounted\n");
 }
 
@@ -151,9 +163,19 @@ pub fn create(path: []const u8, kind: Kind) Error!*Node {
     if (lookup(parent, parts.name) != null) return Error.Exists;
     const node = try makeNode(kind, parts.name);
     try addChild(parent, node);
-    if (kind == .file and mount_root != null and parent == mount_root.?) {
+    if (parent.on_disk and parent.kind == .dir) {
+        const pdir = fatDirOf(parent);
         node.on_disk = true;
-        _ = fat.writeFile(node.name, "");
+        if (kind == .file) {
+            node.cluster = 0;
+            _ = fat.writeFileIn(pdir, node.name, "");
+        } else if (kind == .dir) {
+            if (fat.mkdirIn(pdir, node.name)) |e| {
+                node.cluster = e.cluster;
+            } else {
+                node.on_disk = false;
+            }
+        }
     }
     return node;
 }
@@ -201,7 +223,8 @@ pub fn writeAt(node: *Node, buf: []const u8, offset: usize) Error!usize {
             }
             @memcpy(node.data[offset..end], buf);
             if (end > node.size) node.size = end;
-            if (node.on_disk) _ = fat.writeFile(node.name, node.data[0..node.size]);
+            if (node.on_disk and node.parent != null)
+                _ = fat.writeFileIn(fatDirOf(node.parent.?), node.name, node.data[0..node.size]);
             return buf.len;
         },
     }

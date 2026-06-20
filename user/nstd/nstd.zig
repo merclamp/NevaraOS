@@ -83,6 +83,11 @@ pub fn waitpid(pid: isize, status: *u32, options: usize) isize {
     return @bitCast(syscall3(61, @bitCast(pid), @intFromPtr(status), options));
 }
 
+/// mkdir(): create a directory. Returns 0 on success, negative on error.
+pub fn mkdir(path: [*:0]const u8) isize {
+    return @bitCast(syscall1(83, @intFromPtr(path)));
+}
+
 /// A null-terminated C string as a Zig slice.
 pub fn span(p: [*:0]const u8) []const u8 {
     var len: usize = 0;

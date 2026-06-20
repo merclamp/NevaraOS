@@ -38,8 +38,10 @@ pub fn main() void {
         appletLs();
     } else if (std.mem.eql(u8, cmd, "mkfile")) {
         appletMkfile();
+    } else if (std.mem.eql(u8, cmd, "mkdir")) {
+        appletMkdir();
     } else {
-        nstd.print("nevbox: applets: echo, cat, ls, mkfile\n");
+        nstd.print("nevbox: applets: echo, cat, ls, mkfile, mkdir\n");
     }
 }
 
@@ -71,6 +73,20 @@ fn appletMkfile() void {
     }
     _ = nstd.write(@intCast(fd), "\n");
     nstd.close(@intCast(fd));
+}
+
+fn appletMkdir() void {
+    var i: usize = 1;
+    var any = false;
+    while (nstd.argZ(i)) |path| : (i += 1) {
+        any = true;
+        if (nstd.mkdir(path) < 0) {
+            nstd.print("mkdir: cannot create ");
+            nstd.print(nstd.arg(i).?);
+            nstd.print("\n");
+        }
+    }
+    if (!any) nstd.print("usage: mkdir <dir>...\n");
 }
 
 fn appletCat() void {

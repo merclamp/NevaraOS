@@ -264,6 +264,7 @@ fn installBinaries() void {
     install("/bin/cat", nevbox);
     install("/bin/ls", nevbox);
     install("/bin/mkfile", nevbox);
+    install("/bin/mkdir", nevbox);
 }
 
 fn install(path: []const u8, bytes: []const u8) void {

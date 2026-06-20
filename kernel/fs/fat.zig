@@ -15,6 +15,7 @@ const SECTOR: u32 = 512;
 const DIR_ENTRY = 32;
 const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_VOLUME: u8 = 0x08;
+const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_LFN: u8 = 0x0F;
 const EOC: u16 = 0xFFF8; // end-of-chain threshold
 
@@ -266,23 +267,122 @@ inline fn lower(c: u8) u8 {
 
 // ---- Root directory iteration ----------------------------------------------
 
-/// Call `cb` for each regular file in the root directory.
-pub fn forEachRoot(ctx: anytype, comptime cb: fn (@TypeOf(ctx), name: []const u8, cluster: u16, size: u32) void) void {
-    if (!mounted) return;
+/// A directory handle: the fixed root region, or a subdirectory's cluster chain.
+pub const Dir = struct { is_root: bool, cluster: u32 };
+
+pub fn root() Dir {
+    return .{ .is_root = true, .cluster = 0 };
+}
+
+pub const Entry = struct {
+    name: [13]u8 = undefined,
+    name_len: usize = 0,
+    is_dir: bool = false,
+    cluster: u16 = 0,
+    size: u32 = 0,
+};
+
+const Slot = struct { lba: u32, off: usize };
+
+/// LBA of the `idx`-th sector of a directory, or null past its end. The root is
+/// a fixed region; a subdirectory follows its cluster chain.
+fn dirSectorLba(dir: Dir, idx: u32) ?u32 {
+    if (dir.is_root) {
+        if (idx >= root_dir_sectors) return null;
+        return root_start + idx;
+    }
+    var c: u32 = dir.cluster;
+    var ci: u32 = idx / spc;
+    while (ci > 0) : (ci -= 1) {
+        c = fatGet(c);
+        if (c < 2 or c >= EOC) return null;
+    }
+    return clusterLba(c) + (idx % spc);
+}
+
+/// Return the `index`-th real entry in `dir` (skipping volume/LFN/dot entries).
+pub fn entryAt(dir: Dir, index: usize) ?Entry {
+    if (!mounted) return null;
+    var count: usize = 0;
     var s: u32 = 0;
-    while (s < root_dir_sectors) : (s += 1) {
-        if (!ata.readSector(root_start + s, &sbuf)) return;
+    while (dirSectorLba(dir, s)) |lba| : (s += 1) {
+        if (!ata.readSector(lba, &sbuf)) return null;
         var e: usize = 0;
         while (e < SECTOR) : (e += DIR_ENTRY) {
             const ent = sbuf[e .. e + DIR_ENTRY];
-            if (ent[0] == 0x00) return; // no more entries
-            if (ent[0] == 0xE5) continue; // deleted
+            if (ent[0] == 0x00) return null;
+            if (ent[0] == 0xE5 or ent[0] == '.') continue;
             const attr = ent[11];
             if (attr & ATTR_VOLUME != 0 or attr == ATTR_LFN) continue;
-            var namebuf: [13]u8 = undefined;
-            const n = decode83(ent[0..11], &namebuf);
-            cb(ctx, namebuf[0..n], rU16(ent, 26), rU32(ent, 28));
+            if (count == index) {
+                var out = Entry{};
+                out.name_len = decode83(ent[0..11], &out.name);
+                out.is_dir = (attr & ATTR_DIRECTORY) != 0;
+                out.cluster = rU16(ent, 26);
+                out.size = rU32(ent, 28);
+                return out;
+            }
+            count += 1;
         }
+    }
+    return null;
+}
+
+/// Find a slot holding `short` in `dir`. On success `sbuf` holds its sector.
+fn findSlot(dir: Dir, short: *const [11]u8) ?Slot {
+    var s: u32 = 0;
+    while (dirSectorLba(dir, s)) |lba| : (s += 1) {
+        if (!ata.readSector(lba, &sbuf)) return null;
+        var e: usize = 0;
+        while (e < SECTOR) : (e += DIR_ENTRY) {
+            if (sbuf[e] == 0x00) return null;
+            if (std.mem.eql(u8, sbuf[e .. e + 11], short)) return .{ .lba = lba, .off = e };
+        }
+    }
+    return null;
+}
+
+fn lastCluster(first: u32) u32 {
+    var c = first;
+    while (true) {
+        const n = fatGet(c);
+        if (n < 2 or n >= EOC) return c;
+        c = n;
+    }
+}
+
+fn zeroCluster(c: u32) void {
+    @memset(sbuf[0..SECTOR], 0);
+    var k: u32 = 0;
+    while (k < spc) : (k += 1) _ = ata.writeSector(clusterLba(c) + k, &sbuf);
+}
+
+/// Append a fresh cluster to a subdirectory's chain. Returns false on no space.
+fn growDir(dir: Dir) bool {
+    const nc = allocCluster();
+    if (nc == 0) return false;
+    zeroCluster(nc);
+    fatSet(lastCluster(dir.cluster), @intCast(nc));
+    fatSet(nc, 0xFFFF);
+    flushFat();
+    return true;
+}
+
+/// Find a free slot in `dir`, growing a subdirectory if needed.
+fn allocSlot(dir: Dir) ?Slot {
+    var s: u32 = 0;
+    while (true) {
+        const lba = dirSectorLba(dir, s) orelse {
+            if (dir.is_root) return null; // the root cannot grow
+            if (!growDir(dir)) return null;
+            continue;
+        };
+        if (!ata.readSector(lba, &sbuf)) return null;
+        var e: usize = 0;
+        while (e < SECTOR) : (e += DIR_ENTRY) {
+            if (sbuf[e] == 0x00 or sbuf[e] == 0xE5) return .{ .lba = lba, .off = e };
+        }
+        s += 1;
     }
 }
 
@@ -308,88 +408,97 @@ pub fn readFile(first_cluster: u16, size: u32, out: []u8) usize {
     return done;
 }
 
-/// Create or overwrite a root-directory file with `data`. Returns false on
-/// failure (no space, name too long, disk error).
-pub fn writeFile(name: []const u8, data: []const u8) bool {
+/// Allocate a cluster chain and write `data` into it. Returns the first cluster
+/// (0 for empty), or null on failure.
+fn writeData(data: []const u8) ??u16 {
+    if (data.len == 0) return @as(?u16, 0);
+    const cb = clusterBytes();
+    const need = (data.len + cb - 1) / cb;
+    var first: u16 = 0;
+    var prev: u32 = 0;
+    var written: usize = 0;
+    var n: usize = 0;
+    while (n < need) : (n += 1) {
+        const c = allocCluster();
+        if (c == 0) return null;
+        if (prev == 0) first = @intCast(c) else fatSet(prev, @intCast(c));
+        prev = c;
+        var k: u32 = 0;
+        while (k < spc) : (k += 1) {
+            @memset(sbuf[0..SECTOR], 0);
+            const chunk = @min(@as(usize, SECTOR), data.len - written);
+            if (chunk > 0) @memcpy(sbuf[0..chunk], data[written..][0..chunk]);
+            if (!ata.writeSector(clusterLba(c) + k, &sbuf)) return null;
+            written += chunk;
+            if (written >= data.len) break;
+        }
+    }
+    fatSet(prev, 0xFFFF);
+    return @as(?u16, first);
+}
+
+/// Create or overwrite a file named `name` in directory `dir` with `data`.
+pub fn writeFileIn(dir: Dir, name: []const u8, data: []const u8) bool {
     if (!mounted) return false;
     var short: [11]u8 = undefined;
     encode83(name, &short);
 
-    // Find an existing entry (to overwrite) or a free slot.
-    var slot_sector: u32 = 0;
-    var slot_off: usize = 0;
-    var found = false;
-    var free_sector: u32 = 0;
-    var free_off: usize = 0;
-    var has_free = false;
-
-    var s: u32 = 0;
-    scan: while (s < root_dir_sectors) : (s += 1) {
-        if (!ata.readSector(root_start + s, &sbuf)) return false;
-        var e: usize = 0;
-        while (e < SECTOR) : (e += DIR_ENTRY) {
-            const ent = sbuf[e .. e + DIR_ENTRY];
-            if (ent[0] == 0x00 or ent[0] == 0xE5) {
-                if (!has_free) {
-                    free_sector = root_start + s;
-                    free_off = e;
-                    has_free = true;
-                }
-                if (ent[0] == 0x00) break :scan;
-                continue;
-            }
-            if (std.mem.eql(u8, ent[0..11], &short)) {
-                slot_sector = root_start + s;
-                slot_off = e;
-                found = true;
-                // Free its old cluster chain before rewriting.
-                freeChain(rU16(ent, 26));
-                break :scan;
-            }
-        }
+    var slot: Slot = undefined;
+    if (findSlot(dir, &short)) |found| {
+        freeChain(rU16(&sbuf, found.off + 26)); // sbuf still holds found's sector
+        slot = found;
+    } else {
+        slot = allocSlot(dir) orelse return false;
     }
 
-    if (!found) {
-        if (!has_free) return false;
-        slot_sector = free_sector;
-        slot_off = free_off;
-    }
-
-    // Allocate a cluster chain and write the data.
-    var first: u16 = 0;
-    if (data.len > 0) {
-        const cb = clusterBytes();
-        const need = (data.len + cb - 1) / cb;
-        var prev: u32 = 0;
-        var written: usize = 0;
-        var n: usize = 0;
-        while (n < need) : (n += 1) {
-            const c = allocCluster();
-            if (c == 0) return false;
-            if (prev == 0) first = @intCast(c) else fatSet(prev, @intCast(c));
-            prev = c;
-            // Write this cluster's sectors.
-            var k: u32 = 0;
-            while (k < spc) : (k += 1) {
-                @memset(sbuf[0..SECTOR], 0);
-                const chunk = @min(@as(usize, SECTOR), data.len - written);
-                if (chunk > 0) @memcpy(sbuf[0..chunk], data[written..][0..chunk]);
-                if (!ata.writeSector(clusterLba(c) + k, &sbuf)) return false;
-                written += chunk;
-                if (written >= data.len) break;
-            }
-        }
-        fatSet(prev, 0xFFFF);
-    }
+    const first = writeData(data) orelse return false;
     flushFat();
 
-    // Write the directory entry.
-    if (!ata.readSector(slot_sector, &sbuf)) return false;
-    const ent = sbuf[slot_off .. slot_off + DIR_ENTRY];
+    if (!ata.readSector(slot.lba, &sbuf)) return false;
+    const ent = sbuf[slot.off .. slot.off + DIR_ENTRY];
     @memset(ent, 0);
     @memcpy(ent[0..11], &short);
     ent[11] = ATTR_ARCHIVE;
-    wU16(ent, 26, first);
+    wU16(ent, 26, first.?);
     wU32(ent, 28, @intCast(data.len));
-    return ata.writeSector(slot_sector, &sbuf);
+    return ata.writeSector(slot.lba, &sbuf);
+}
+
+/// Create a subdirectory `name` inside `dir`. Returns its entry, or null.
+pub fn mkdirIn(dir: Dir, name: []const u8) ?Entry {
+    if (!mounted) return null;
+    var short: [11]u8 = undefined;
+    encode83(name, &short);
+
+    const dc = allocCluster();
+    if (dc == 0) return null;
+    zeroCluster(dc);
+
+    // Write the "." and ".." entries into the new directory's first sector.
+    @memset(sbuf[0..SECTOR], 0);
+    @memset(sbuf[0..11], ' ');
+    sbuf[0] = '.';
+    sbuf[11] = ATTR_DIRECTORY;
+    wU16(&sbuf, 26, @intCast(dc));
+    @memset(sbuf[32..43], ' ');
+    sbuf[32] = '.';
+    sbuf[33] = '.';
+    sbuf[43] = ATTR_DIRECTORY;
+    wU16(&sbuf, 58, if (dir.is_root) 0 else @intCast(dir.cluster));
+    if (!ata.writeSector(clusterLba(dc), &sbuf)) return null;
+    fatSet(dc, 0xFFFF);
+    flushFat();
+
+    const slot = allocSlot(dir) orelse return null;
+    if (!ata.readSector(slot.lba, &sbuf)) return null;
+    const ent = sbuf[slot.off .. slot.off + DIR_ENTRY];
+    @memset(ent, 0);
+    @memcpy(ent[0..11], &short);
+    ent[11] = ATTR_DIRECTORY;
+    wU16(ent, 26, @intCast(dc));
+    if (!ata.writeSector(slot.lba, &sbuf)) return null;
+
+    var out = Entry{ .is_dir = true, .cluster = @intCast(dc) };
+    out.name_len = decode83(&short, &out.name);
+    return out;
 }
