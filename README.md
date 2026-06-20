@@ -53,12 +53,13 @@ Two foundational stages are done and verified in QEMU:
   and renders output to the screen.
 - ✅ **Memory management** — tracks all physical RAM, manages virtual memory
   (page tables), and provides a growing kernel heap.
+- ✅ **Processes & scheduling** — kernel threads with context switching and a
+  preemptive, timer-driven round-robin scheduler.
 
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Processes & scheduling** — tasks, context switching, a scheduler.
 - ⏳ **Filesystem & system calls** — a virtual filesystem layer and the first
   Linux-compatible system calls.
 - ⏳ **Userland** — loading and running real programs, an init system, a shell.
@@ -126,6 +127,13 @@ All output is mirrored to the serial port (COM1) for debugging.
   by on-demand page mappings; supports splitting, coalescing, and arbitrary
   alignment.
 
+**Processes & scheduling.** Kernel threads each own a heap-allocated stack;
+`context_switch` (assembly) saves the callee-saved registers and RFLAGS, so the
+interrupt flag is per-thread and new threads start preemptible. The 8259 PIC is
+remapped to vectors 0x20-0x2F and the PIT fires IRQ0 at 100 Hz; the timer
+handler acknowledges the interrupt and round-robins to the next ready thread.
+Cooperative `yield()` uses the same switch primitive.
+
 **Source layout.**
 
 ```
@@ -136,5 +144,6 @@ kernel/
   font.zig           bitmap font (public domain)
   arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer, console
   mm/                pmm, vmm, heap
+  proc/              scheduler and kernel threads
   lib/c.zig          freestanding mem builtins
 ```
