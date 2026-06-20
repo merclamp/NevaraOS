@@ -28,6 +28,111 @@ pub fn build(b: *std.Build) void {
         .cpu_features_add = add,
     });
 
+    // ---- Userspace: build the first init program (static ELF) ----------
+    // Linked at a fixed 64 TiB base, so it needs the large code model. It is
+    // linked by ld.lld (like the kernel) and embedded into the kernel image.
+    const user_mod = b.createModule(.{
+        .root_source_file = b.path("user/init.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+        .strip = true,
+    });
+    const user_obj = b.addObject(.{ .name = "init", .root_module = user_mod });
+    const nstd_mod = b.createModule(.{
+        .root_source_file = b.path("user/nstd/nstd.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+    });
+    user_mod.addImport("nstd", nstd_mod);
+    const user_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
+    user_link.addFileArg(b.path("user/linker.ld"));
+    user_link.addArg("-o");
+    const user_elf = user_link.addOutputFileArg("init.elf");
+    user_link.addFileArg(user_obj.getEmittedBin());
+
+    // NevBox — multi-call userland utility (shares the nstd runtime).
+    const nevbox_mod = b.createModule(.{
+        .root_source_file = b.path("user/nevbox/nevbox.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+        .strip = true,
+    });
+    nevbox_mod.addImport("nstd", nstd_mod);
+    const nevbox_obj = b.addObject(.{ .name = "nevbox", .root_module = nevbox_mod });
+    const nevbox_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
+    nevbox_link.addFileArg(b.path("user/linker.ld"));
+    nevbox_link.addArg("-o");
+    const nevbox_elf = nevbox_link.addOutputFileArg("nevbox.elf");
+    nevbox_link.addFileArg(nevbox_obj.getEmittedBin());
+
+    // ZInit — the init system (PID 1), also on nstd.
+    const zinit_mod = b.createModule(.{
+        .root_source_file = b.path("user/zinit/zinit.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+        .strip = true,
+    });
+    zinit_mod.addImport("nstd", nstd_mod);
+    const zinit_obj = b.addObject(.{ .name = "zinit", .root_module = zinit_mod });
+    const zinit_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
+    zinit_link.addFileArg(b.path("user/linker.ld"));
+    zinit_link.addArg("-o");
+    const zinit_elf = zinit_link.addOutputFileArg("zinit.elf");
+    zinit_link.addFileArg(zinit_obj.getEmittedBin());
+
+    // ---- ZLibc: our own C standard library + a C test program ----------
+    const zlibc_mod = b.createModule(.{
+        .root_source_file = b.path("zlibc/zlibc.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+    });
+    const zlibc_obj = b.addObject(.{ .name = "zlibc", .root_module = zlibc_mod });
+
+    // Compile hello.c with `zig cc` against our headers (no host libc).
+    const cc = b.addSystemCommand(&.{ b.graph.zig_exe, "cc" });
+    cc.addArgs(&.{
+        "-target",          "x86_64-freestanding",
+        "-ffreestanding",   "-nostdlib",
+        "-nostdinc",        "-fno-stack-protector",
+        "-mcmodel=large",   "-O2",
+        "-c",
+    });
+    cc.addPrefixedDirectoryArg("-I", b.path("zlibc/include"));
+    cc.addFileArg(b.path("user/hello.c"));
+    cc.addArg("-o");
+    const hello_o = cc.addOutputFileArg("hello.o");
+
+    const c_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
+    c_link.addFileArg(b.path("user/linker.ld"));
+    c_link.addArg("-o");
+    const hello_elf = c_link.addOutputFileArg("hello.elf");
+    c_link.addFileArg(hello_o);
+    c_link.addFileArg(zlibc_obj.getEmittedBin());
     // Compile the kernel (Zig + assembly) into a single relocatable object.
     // We do NOT let Zig do the final link:
     //   * Zig's `-flld` path SEGVs on this freestanding target (0.16 bug),
@@ -49,6 +154,14 @@ pub fn build(b: *std.Build) void {
     kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/flush.S"));
     kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/isr.S"));
     kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/switch.S"));
+    kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/usermode.S"));
+    kernel_mod.addAssemblyFile(b.path("kernel/arch/x86_64/user_payload.S"));
+
+    // Embed the built init ELF so the kernel can @embedFile("init_elf").
+    kernel_mod.addAnonymousImport("init_elf", .{ .root_source_file = user_elf });
+    kernel_mod.addAnonymousImport("hello_elf", .{ .root_source_file = hello_elf });
+    kernel_mod.addAnonymousImport("nevbox_elf", .{ .root_source_file = nevbox_elf });
+    kernel_mod.addAnonymousImport("zinit_elf", .{ .root_source_file = zinit_elf });
 
     const kernel_obj = b.addObject(.{
         .name = "kernel",

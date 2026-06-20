@@ -1,0 +1,228 @@
+//! nstd — Nevara's native userspace runtime for Zig programs.
+//!
+//! A thin layer over the kernel syscall ABI: no C library involved. Provides
+//! `_start`, raw syscalls, simple console I/O, and a brk-backed allocator. A
+//! program just defines `pub fn main() void` and imports this module.
+
+const std = @import("std");
+
+// Linux x86_64 syscall numbers.
+const SYS_read: usize = 0;
+const SYS_write: usize = 1;
+const SYS_open: usize = 2;
+const SYS_close: usize = 3;
+const SYS_lseek: usize = 8;
+const SYS_brk: usize = 12;
+const SYS_getpid: usize = 39;
+const SYS_getdents64: usize = 217;
+const SYS_spawn: usize = 1000;
+const SYS_exit: usize = 60;
+
+inline fn syscall1(n: usize, a1: usize) usize {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (n),
+          [a1] "{rdi}" (a1),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+}
+
+inline fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) usize {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (n),
+          [a1] "{rdi}" (a1),
+          [a2] "{rsi}" (a2),
+          [a3] "{rdx}" (a3),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+}
+
+// ---- Raw syscall wrappers ---------------------------------------------------
+
+pub fn write(fd: usize, buf: []const u8) usize {
+    return syscall3(SYS_write, fd, @intFromPtr(buf.ptr), buf.len);
+}
+
+pub fn read(fd: usize, buf: []u8) usize {
+    return syscall3(SYS_read, fd, @intFromPtr(buf.ptr), buf.len);
+}
+
+pub fn open(path: [*:0]const u8, flags: usize) isize {
+    return @bitCast(syscall3(SYS_open, @intFromPtr(path), flags, 0));
+}
+
+pub fn close(fd: usize) void {
+    _ = syscall1(SYS_close, fd);
+}
+
+pub fn getdents64(fd: usize, buf: []u8) isize {
+    return @bitCast(syscall3(SYS_getdents64, fd, @intFromPtr(buf.ptr), buf.len));
+}
+
+/// Spawn an isolated child process from `path` with the given argv (a
+/// null-terminated array of C strings). Returns its exit code.
+pub fn spawn(path: [*:0]const u8, argv: [*]const ?[*:0]const u8) isize {
+    return @bitCast(syscall3(SYS_spawn, @intFromPtr(path), @intFromPtr(argv), 0));
+}
+
+/// A null-terminated C string as a Zig slice.
+pub fn span(p: [*:0]const u8) []const u8 {
+    var len: usize = 0;
+    while (p[len] != 0) len += 1;
+    return p[0..len];
+}
+
+pub fn getpid() usize {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (SYS_getpid),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+}
+
+pub fn exit(code: usize) noreturn {
+    _ = syscall1(SYS_exit, code);
+    unreachable;
+}
+
+fn brk(addr: usize) usize {
+    return syscall1(SYS_brk, addr);
+}
+
+// ---- Console I/O ------------------------------------------------------------
+
+pub fn print(s: []const u8) void {
+    _ = write(1, s);
+}
+
+pub fn eprint(s: []const u8) void {
+    _ = write(2, s);
+}
+
+pub fn printDec(value: u64) void {
+    var buf: [20]u8 = undefined;
+    if (value == 0) {
+        print("0");
+        return;
+    }
+    var i: usize = 0;
+    var v = value;
+    while (v > 0) : (v /= 10) {
+        buf[i] = '0' + @as(u8, @intCast(v % 10));
+        i += 1;
+    }
+    var j: usize = i;
+    while (j > 0) {
+        j -= 1;
+        _ = write(1, buf[j .. j + 1]);
+    }
+}
+
+// ---- Allocator (bump, grown via brk) ----------------------------------------
+
+var heap_cur: usize = 0;
+var heap_end: usize = 0;
+
+inline fn alignUp(v: usize, a: usize) usize {
+    return (v + a - 1) & ~(a - 1);
+}
+
+fn allocImpl(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    if (heap_cur == 0) {
+        heap_cur = brk(0);
+        heap_end = heap_cur;
+    }
+    const a = alignment.toByteUnits();
+    const base = alignUp(heap_cur, a);
+    const end = base + len;
+    if (end > heap_end) {
+        const want = alignUp(end, 0x1000);
+        const got = brk(want);
+        if (got < end) return null;
+        heap_end = got;
+    }
+    heap_cur = end;
+    return @ptrFromInt(base);
+}
+
+fn resizeImpl(_: *anyopaque, m: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
+    return new_len <= m.len;
+}
+
+fn remapImpl(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+    return null;
+}
+
+fn freeImpl(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
+
+const vtable = std.mem.Allocator.VTable{
+    .alloc = allocImpl,
+    .resize = resizeImpl,
+    .remap = remapImpl,
+    .free = freeImpl,
+};
+
+/// A simple arena-style allocator (bump; free is a no-op).
+pub fn allocator() std.mem.Allocator {
+    return .{ .ptr = undefined, .vtable = &vtable };
+}
+
+// ---- Freestanding C mem builtins (the compiler may emit calls to these) ------
+
+export fn memcpy(noalias d: [*]u8, noalias s: [*]const u8, n: usize) callconv(.c) [*]u8 {
+    var i: usize = 0;
+    while (i < n) : (i += 1) d[i] = s[i];
+    return d;
+}
+export fn memset(d: [*]u8, c: c_int, n: usize) callconv(.c) [*]u8 {
+    const b: u8 = @truncate(@as(c_uint, @bitCast(c)));
+    var i: usize = 0;
+    while (i < n) : (i += 1) d[i] = b;
+    return d;
+}
+
+export fn strlen(s: [*:0]const u8) callconv(.c) usize {
+    var i: usize = 0;
+    while (s[i] != 0) : (i += 1) {
+        asm volatile ("" ::: .{ .memory = true }); // stop the strlen-idiom fold
+    }
+    return i;
+}
+
+// ---- Entry point + arguments ------------------------------------------------
+
+var g_argc: usize = 0;
+var g_argv: [*]const ?[*:0]const u8 = undefined;
+
+/// Number of command-line arguments.
+pub fn argc() usize {
+    return g_argc;
+}
+
+/// Argument `i` as a slice, or null if out of range.
+pub fn arg(i: usize) ?[]const u8 {
+    if (i >= g_argc) return null;
+    const p = g_argv[i] orelse return null;
+    var len: usize = 0;
+    while (p[len] != 0) len += 1;
+    return p[0..len];
+}
+
+/// Argument `i` as a null-terminated C pointer (for `open`), or null.
+pub fn argZ(i: usize) ?[*:0]const u8 {
+    if (i >= g_argc) return null;
+    return g_argv[i];
+}
+
+/// Runtime entry: a program's naked `_start` reads argc/argv off the stack and
+/// tail-calls this. It records the arguments, runs `main`, and exits.
+///     export fn _start() callconv(.naked) noreturn {
+///         asm volatile ("mov (%rsp),%rdi; lea 8(%rsp),%rsi; call startMain");
+///     }
+///     export fn startMain(c: usize, v: [*]const ?[*:0]const u8) callconv(.c) noreturn {
+///         nstd.start(c, v);
+///     }
+pub fn start(c: usize, v: [*]const ?[*:0]const u8) noreturn {
+    g_argc = c;
+    g_argv = v;
+    @import("root").main();
+    exit(0);
+}

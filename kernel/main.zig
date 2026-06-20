@@ -14,6 +14,8 @@ const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
 const syscall = @import("syscall/syscall.zig");
+const usermode = @import("arch/x86_64/usermode.zig");
+const elf = @import("exec/elf.zig");
 
 comptime {
     _ = @import("lib/c.zig"); // export memcpy/memmove/memset/memcmp
@@ -68,6 +70,9 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         testPreempt();
         testVfs();
         testSyscall();
+        usermode.init();
+        installBinaries();
+        runZInit();
     } else {
         console.writeString("[mb2] skipping memory map (not multiboot2-booted)\n");
     }
@@ -333,6 +338,28 @@ fn testSyscall() void {
     console.writeString(", open(bad)=");
     console.writeDec(@intCast(-bad));
     console.writeString(" (errno)\n");
+}
+
+/// Write the embedded userland binaries into /bin (tmpfs) so the spawn syscall
+/// can load them by path.
+fn installBinaries() void {
+    _ = vfs.mkdir("/bin") catch {};
+    install("/bin/zinit", @embedFile("zinit_elf"));
+    install("/bin/nevbox", @embedFile("nevbox_elf"));
+    install("/bin/hello", @embedFile("hello_elf"));
+    install("/bin/init", @embedFile("init_elf"));
+}
+
+fn install(path: []const u8, bytes: []const u8) void {
+    const f = vfs.create(path, .file) catch return;
+    _ = vfs.writeAt(f, bytes, 0) catch {};
+}
+
+/// Launch ZInit (PID 1). It spawns the rest of userland as isolated processes.
+fn runZInit() void {
+    console.writeString("[boot] starting /bin/zinit as PID 1\n");
+    _ = usermode.spawnImage(@embedFile("zinit_elf"), &.{"/bin/zinit"});
+    console.writeString("[boot] init exited\n");
 }
 
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the

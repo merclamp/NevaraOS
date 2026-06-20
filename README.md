@@ -43,10 +43,13 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 - Boots on standard PCs via GRUB.
 - Its own graphical text console (1024×768) — readable on a real monitor.
 - A clean, modular kernel where every piece is meant to be understandable.
+- Runs real ring-3 programs from a built-in ELF loader, including an init
+  system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
+  C library (**ZLibc**) — all written in Zig, no external libc.
 
 ## Current status
 
-Four foundational stages are done and verified in QEMU:
+Five foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -57,14 +60,18 @@ Four foundational stages are done and verified in QEMU:
   preemptive, timer-driven round-robin scheduler.
 - ✅ **Filesystem & system calls** — an in-memory filesystem (files, directories,
   devices) and a Linux-compatible system call layer.
+- ✅ **Userspace & init** — ring 3 with a `syscall` entry, an ELF loader,
+  isolated per-process address spaces, the ZLibc/nstd runtimes, and **ZInit**
+  (PID 1) launching **NevBox** applets and C programs.
 
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Userland** — loading and running real programs, an init system, a shell.
+- ⏳ **Concurrent multitasking** — running several user processes at once
+  (`fork`/`exec`/`wait`); process spawning is synchronous for now.
 - ⏳ **Real filesystems** — reading and writing actual disks.
-- ⏳ **Linux compatibility** — running unmodified Linux programs.
+- ⏳ **More userland** — a shell, more NevBox applets, a richer ZLibc.
 - ⏳ **Polish** — networking, a native filesystem, users & permissions, a
   package manager, and more.
 
@@ -138,9 +145,18 @@ Cooperative `yield()` uses the same switch primitive.
 (tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
 `/dev/zero`, `/dev/console`); files grow their buffers from the heap. On top sits
 a per-task file-descriptor table and a dispatcher keyed by the Linux x86_64
-syscall numbers (read, write, open, close, lseek, getpid, mkdir, ...), returning
-negative errno on failure. The ring-3 `syscall`-instruction entry arrives with
-userspace; for now the dispatcher is driven directly.
+syscall numbers (read, write, open, close, lseek, getpid, brk, mkdir,
+getdents64, ...), returning negative errno on failure.
+
+**Userspace.** Ring 3 is entered via `iretq`; user programs trap into the kernel
+with the `syscall` instruction (SYSCALL/SYSRET MSRs configured). An ELF64 loader
+maps static executables into **per-process address spaces** (each its own PML4,
+sharing the kernel mappings), so every program can be linked at the same fixed
+high base without colliding. `spawn(path, argv)` loads a binary from the VFS and
+runs it as an isolated process, returning its exit code (synchronous for now).
+Userland is built on two Zig runtimes — **nstd** (native, libc-free) and
+**ZLibc** (a small C library compiled by `zig cc`); on top of them sit **ZInit**
+(PID 1) and **NevBox** (a multi-call coreutils binary).
 
 **Source layout.**
 
@@ -155,5 +171,11 @@ kernel/
   proc/              scheduler and kernel threads
   fs/                virtual filesystem (in-memory tmpfs + devices)
   syscall/           file descriptors and the syscall dispatcher
+  exec/elf.zig       ELF64 loader
   lib/c.zig          freestanding mem builtins
+user/
+  nstd/              native libc-free Zig runtime
+  init.zig, zinit/    first program and the init system (PID 1)
+  nevbox/            multi-call coreutils utility
+zlibc/               our own C library (Zig) + headers
 ```

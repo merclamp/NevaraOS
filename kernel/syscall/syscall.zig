@@ -10,6 +10,10 @@
 const std = @import("std");
 const vfs = @import("../fs/vfs.zig");
 const sched = @import("../proc/sched.zig");
+const pmm = @import("../mm/pmm.zig");
+const vmm = @import("../mm/vmm.zig");
+const heap = @import("../mm/heap.zig");
+const usermode = @import("../arch/x86_64/usermode.zig");
 
 // Linux x86_64 syscall numbers (subset).
 const SYS_read: usize = 0;
@@ -17,7 +21,10 @@ const SYS_write: usize = 1;
 const SYS_open: usize = 2;
 const SYS_close: usize = 3;
 const SYS_lseek: usize = 8;
+const SYS_brk: usize = 12;
 const SYS_getpid: usize = 39;
+const SYS_getdents64: usize = 217;
+const SYS_spawn: usize = 1000;
 const SYS_exit: usize = 60;
 const SYS_mkdir: usize = 83;
 
@@ -49,6 +56,11 @@ const File = struct {
 };
 
 var fds: [MAX_FD]File = .{File{}} ** MAX_FD;
+
+// Userspace program break (single task for now). The heap sits between the ELF
+// segments (64 TiB base) and the user stack region.
+const USER_HEAP_BASE: usize = 0x4000_1000_0000;
+var user_brk: usize = 0;
 
 fn errnoFor(e: vfs.Error) isize {
     return -switch (e) {
@@ -137,6 +149,106 @@ fn sysMkdir(path_ptr: usize) isize {
     return 0;
 }
 
+/// spawn(path, argv): load an ELF from the VFS and run it as an isolated child
+/// process. argv strings (in the caller's address space) are copied into kernel
+/// memory before the address-space switch. Returns the child's exit code.
+fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
+    const path = cstr(path_ptr);
+    const node = vfs.resolve(path) catch |e| return errnoFor(e);
+    if (node.kind != .file) return -EINVAL;
+    const image = node.data[0..node.size];
+
+    const a = heap.allocator();
+    var bufs: [16][]u8 = undefined;
+    var args: [16][]const u8 = undefined;
+    var n: usize = 0;
+    if (argv_ptr != 0) {
+        const argv: [*]const usize = @ptrFromInt(argv_ptr);
+        while (n < 16 and argv[n] != 0) : (n += 1) {
+            const s = cstr(argv[n]);
+            const buf = a.alloc(u8, s.len) catch break;
+            @memcpy(buf, s);
+            bufs[n] = buf;
+            args[n] = buf;
+        }
+    }
+
+    const code = usermode.spawnImage(image, args[0..n]);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) a.free(bufs[i]);
+    return code;
+}
+
+// Linux dirent type values.
+const DT_CHR: u8 = 2;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+
+inline fn alignUp8(v: usize) usize {
+    return (v + 7) & ~@as(usize, 7);
+}
+
+/// getdents64(fd, buf, count): fill `buf` with linux_dirent64 records for the
+/// directory. The fd offset tracks the next child index. Returns bytes written,
+/// 0 at end of directory.
+fn sysGetdents64(fd: usize, buf_ptr: usize, count: usize) isize {
+    if (fd >= MAX_FD or !fds[fd].used) return -EBADF;
+    const f = &fds[fd];
+    const dir = f.node;
+    if (dir.kind != .dir) return -ENOTDIR;
+
+    const out: [*]u8 = @ptrFromInt(buf_ptr);
+    var written: usize = 0;
+
+    while (vfs.readdir(dir, f.offset)) |child| {
+        // linux_dirent64: u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type, name\0
+        const name = child.name;
+        const reclen = alignUp8(19 + name.len + 1);
+        if (written + reclen > count) break;
+
+        const base = out + written;
+        @memset(base[0..reclen], 0);
+        std.mem.writeInt(u64, base[0..8], @intFromPtr(child), .little);
+        std.mem.writeInt(i64, base[8..16], @intCast(f.offset + 1), .little);
+        std.mem.writeInt(u16, base[16..18], @intCast(reclen), .little);
+        base[18] = switch (child.kind) {
+            .dir => DT_DIR,
+            .chardev => DT_CHR,
+            .file => DT_REG,
+        };
+        @memcpy(base[19 .. 19 + name.len], name);
+
+        written += reclen;
+        f.offset += 1;
+    }
+    return @intCast(written);
+}
+
+/// brk(addr): set the program break. addr==0 queries it. Grows by mapping fresh
+/// user pages; returns the (new) break, or the current break on failure.
+fn sysBrk(addr: usize) isize {
+    if (user_brk == 0) user_brk = USER_HEAP_BASE;
+    if (addr == 0 or addr < USER_HEAP_BASE) return @intCast(user_brk);
+
+    const flags = vmm.PRESENT | vmm.WRITABLE | vmm.USER;
+    var page = (user_brk + 0xFFF) & ~@as(usize, 0xFFF);
+    while (page < addr) : (page += 0x1000) {
+        if (vmm.walk(page) == null) {
+            const frame = pmm.alloc() orelse return @intCast(user_brk);
+            if (!vmm.map(page, frame, flags)) return @intCast(user_brk);
+            @memset(@as([*]u8, @ptrFromInt(page))[0..0x1000], 0);
+        }
+    }
+    user_brk = addr;
+    return @intCast(addr);
+}
+
+/// Reset the program break (call when starting a fresh user program).
+pub fn resetBrk() void {
+    user_brk = 0;
+}
+
 /// Central dispatcher: invoked with Linux-style register arguments.
 pub fn dispatch(num: usize, a1: usize, a2: usize, a3: usize) isize {
     return switch (num) {
@@ -145,9 +257,12 @@ pub fn dispatch(num: usize, a1: usize, a2: usize, a3: usize) isize {
         SYS_open => sysOpen(a1, a2),
         SYS_close => sysClose(a1),
         SYS_lseek => sysLseek(a1, a2, a3),
+        SYS_brk => sysBrk(a1),
         SYS_getpid => @intCast(sched.currentThread().id),
         SYS_exit => 0, // no userspace yet; nothing to tear down
         SYS_mkdir => sysMkdir(a1),
+        SYS_getdents64 => sysGetdents64(a1, a2, a3),
+        SYS_spawn => sysSpawn(a1, a2),
         else => -ENOSYS,
     };
 }

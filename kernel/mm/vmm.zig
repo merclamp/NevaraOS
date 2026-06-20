@@ -49,7 +49,10 @@ fn nextTable(table: *[512]u64, i: usize) ?usize {
         const frame = pmm.alloc() orelse return null;
         const fresh = tableEntries(frame);
         for (fresh) |*e| e.* = 0;
-        entry = frame | PRESENT | WRITABLE;
+        // USER on intermediate tables is safe: effective access is the AND of
+        // all levels, so kernel-only leaves stay kernel-only. It lets user
+        // leaves further down be reachable from ring 3.
+        entry = frame | PRESENT | WRITABLE | USER;
         table[i] = entry;
     }
     return entry & ADDR_MASK;
@@ -117,6 +120,31 @@ pub fn walk(virt: usize) ?usize {
     return (e1 & ADDR_MASK) + (virt & 0xFFF);
 }
 
+var kernel_pml4: usize = 0;
+
 pub fn init() void {
+    kernel_pml4 = readCr3() & ADDR_MASK;
     console.writeString("[vmm] active (4-level paging, current CR3)\n");
+}
+
+pub fn currentCr3() usize {
+    return readCr3();
+}
+
+pub fn switchTo(pml4_phys: usize) void {
+    asm volatile ("mov %[v], %%cr3"
+        :
+        : [v] "r" (pml4_phys),
+        : .{ .memory = true });
+}
+
+/// Create a fresh address space that shares the kernel's mappings (the kernel
+/// lives in PML4[0], which is copied) but starts empty for user pages. Returns
+/// the new PML4 physical address.
+pub fn createAddressSpace() ?usize {
+    const frame = pmm.alloc() orelse return null;
+    const new = tableEntries(frame);
+    const kern = tableEntries(kernel_pml4);
+    for (0..512) |i| new[i] = kern[i];
+    return frame;
 }
