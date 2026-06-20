@@ -17,11 +17,13 @@ pub const Error = error{
     NotFound,
     NotDirectory,
     IsDirectory,
+    NotEmpty,
     Exists,
     NotSupported,
     Invalid,
     OutOfMemory,
 };
+
 
 pub const Kind = enum { file, dir, chardev, pipe };
 
@@ -307,6 +309,23 @@ pub fn rename(old_path: []const u8, new_path: []const u8) Error!void {
     }
     alloc.free(node.name);
     node.name = try dupName(np.name);
+}
+
+/// Remove an empty directory at `path`. Returns NotEmpty if it has children,
+/// IsDirectory never (path must be a dir). Updates FAT if on disk.
+pub fn rmdir(path: []const u8) Error!void {
+    const parts = splitParent(path);
+    if (parts.name.len == 0) return Error.Invalid;
+    const parent = try resolve(parts.parent);
+    if (parent.kind != .dir) return Error.NotDirectory;
+    if (parent.on_ext) return Error.NotSupported;
+    const node = lookup(parent, parts.name) orelse return Error.NotFound;
+    if (node.kind != .dir) return Error.NotDirectory;
+    if (node.child_count > 0) return Error.NotEmpty;
+    if (node.on_disk) _ = fat.removeFileIn(fatDirOf(parent), node.name);
+    removeChild(parent, node);
+    alloc.free(node.name);
+    alloc.destroy(node);
 }
 
 /// Read up to `buf.len` bytes from `node` at `offset`.

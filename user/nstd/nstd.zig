@@ -23,6 +23,8 @@ const SYS_uptime: usize = 1001;
 const SYS_unlink: usize = 87;
 const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
+const SYS_rmdir:  usize = 84;
+
 
 
 inline fn syscall1(n: usize, a1: usize) usize {
@@ -114,6 +116,11 @@ pub fn getcwd(buf: []u8) isize {
 /// unlink(): remove a file. Returns 0 on success, negative errno on failure.
 pub fn unlinkFile(path: [*:0]const u8) isize {
     return @bitCast(syscall1(SYS_unlink, @intFromPtr(path)));
+}
+
+/// rmdir(): remove an empty directory. Returns 0 on success, negative errno.
+pub fn rmdirPath(path: [*:0]const u8) isize {
+    return @bitCast(syscall1(SYS_rmdir, @intFromPtr(path)));
 }
 
 /// rename(): rename/move a file or directory. Returns 0 on success.

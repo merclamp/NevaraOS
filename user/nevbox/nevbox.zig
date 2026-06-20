@@ -1048,16 +1048,90 @@ fn appletDirname() void {
     }
 }
 
-// ---- rm --------------------------------------------------------------------
+// ---- rm / rm -r ------------------------------------------------------------
+
+/// Recursively remove path (file or directory tree). Re-opens the directory
+/// on each iteration to avoid invalidated offsets after child removal.
+fn rmRecursive(path_str: []const u8, force: bool) void {
+    // Build null-terminated copy for syscall wrappers.
+    var pbuf: [512]u8 = undefined;
+    if (path_str.len >= pbuf.len - 1) return;
+    @memcpy(pbuf[0..path_str.len], path_str);
+    pbuf[path_str.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&pbuf);
+
+    // Try file removal first.
+    if (nstd.unlinkFile(path_z) == 0) return;
+
+    // Not a file (or doesn't exist) — try treating it as a directory.
+    // Remove children one at a time, re-reading each iteration.
+    while (true) {
+        const fd_raw = nstd.open(path_z, 0);
+        if (fd_raw < 0) {
+            if (!force) {
+                nstd.print("rm: cannot access "); nstd.print(path_str); nstd.print("\n");
+            }
+            return;
+        }
+        var dbuf: [256]u8 = undefined;
+        const n = nstd.getdents64(@intCast(fd_raw), &dbuf);
+        nstd.close(@intCast(fd_raw));
+        if (n <= 0) break; // directory is empty
+
+        // Parse first entry from the dirent buffer.
+        const name_ptr: [*:0]const u8 = @ptrCast(&dbuf[19]);
+        var nlen: usize = 0;
+        while (name_ptr[nlen] != 0) nlen += 1;
+
+        // Build full child path and recurse.
+        var child: [512]u8 = undefined;
+        const clen = path_str.len + 1 + nlen;
+        if (clen < child.len) {
+            @memcpy(child[0..path_str.len], path_str);
+            child[path_str.len] = '/';
+            @memcpy(child[path_str.len + 1 .. path_str.len + 1 + nlen], name_ptr[0..nlen]);
+            rmRecursive(child[0..clen], force);
+        }
+    }
+
+    // Now directory should be empty — remove it.
+    if (nstd.rmdirPath(path_z) < 0 and !force) {
+        nstd.print("rm: cannot remove dir "); nstd.print(path_str); nstd.print("\n");
+    }
+}
 
 fn appletRm() void {
-    if (nstd.argc() < 2) { nstd.print("usage: rm file...\n"); return; }
-    var i: usize = 1;
+    // Parse flags: -r/-R (recursive), -f (force), -rf/-fr/-Rf etc.
+    var recursive = false;
+    var force = false;
+    var file_start: usize = 1;
+
+    while (nstd.arg(file_start)) |a| {
+        if (a.len >= 2 and a[0] == '-') {
+            for (a[1..]) |c| switch (c) {
+                'r', 'R' => recursive = true,
+                'f'      => force     = true,
+                else     => {},
+            };
+            file_start += 1;
+        } else break;
+    }
+
+    if (nstd.argc() <= file_start) {
+        nstd.print("usage: rm [-r] [-f] file...\n");
+        return;
+    }
+
+    var i: usize = file_start;
     while (nstd.argZ(i)) |path| : (i += 1) {
-        if (nstd.unlinkFile(path) < 0) {
-            nstd.print("rm: cannot remove ");
-            nstd.print(nstd.arg(i).?);
-            nstd.print("\n");
+        if (recursive) {
+            rmRecursive(nstd.arg(i).?, force);
+        } else {
+            if (nstd.unlinkFile(path) < 0 and !force) {
+                nstd.print("rm: cannot remove ");
+                nstd.print(nstd.arg(i).?);
+                nstd.print("\n");
+            }
         }
     }
 }

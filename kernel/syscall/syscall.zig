@@ -38,6 +38,8 @@ const SYS_uptime: usize = 1001;
 const SYS_unlink: usize = 87;
 const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
+const SYS_rmdir:  usize = 84;
+
 
 
 // errno values (returned negated).
@@ -52,6 +54,8 @@ const EINVAL: isize = 22;
 const ENOSYS: isize = 38;
 const ERANGE: isize = 34;
 const ENAMETOOLONG: isize = 36;
+const ENOTEMPTY: isize = 39;
+
 
 
 // open() flags.
@@ -69,12 +73,13 @@ const USER_HEAP_BASE: usize = 0x4000_1000_0000;
 
 fn errnoFor(e: vfs.Error) isize {
     return -switch (e) {
-        error.NotFound => ENOENT,
+        error.NotFound    => ENOENT,
         error.NotDirectory => ENOTDIR,
         error.IsDirectory => EISDIR,
-        error.Exists => EEXIST,
-        error.Invalid => EINVAL,
-        else => ENOSYS,
+        error.NotEmpty    => ENOTEMPTY,
+        error.Exists      => EEXIST,
+        error.Invalid     => EINVAL,
+        else              => ENOSYS,
     };
 }
 
@@ -398,6 +403,14 @@ fn sysSleep(seconds: usize) isize {
     return 0;
 }
 
+fn sysRmdir(path_ptr: usize) isize {
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    vfs.rmdir(path) catch |e| return errnoFor(e);
+    return 0;
+}
+
+
 pub fn handle(tf: *usermode.TrapFrame) isize {
     const num = tf.rax;
     const a1 = tf.rdi;
@@ -431,6 +444,7 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_unlink => sysUnlink(a1),
         SYS_rename => sysRename(a1, a2),
         SYS_sleep  => sysSleep(a1),
+        SYS_rmdir  => sysRmdir(a1),
         else => -ENOSYS,
     };
 }
