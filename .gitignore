@@ -1,0 +1,26 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Build / boot images
+*.iso
+*.img
+*.elf
+*.o
+
+# Debug / dumps
+*.log
+*.ppm
+*.png.tmp
+serial.log
+core
+*.core
+
+# Editor / OS noise
+.gjc
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
