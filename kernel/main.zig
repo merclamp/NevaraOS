@@ -281,6 +281,19 @@ fn installBinaries() void {
     install("/bin/uptime",   nevbox);
     install("/bin/uname",    nevbox);
     install("/bin/nevfetch", nevbox);
+    // new applets
+    install("/bin/sort",     nevbox);
+    install("/bin/uniq",     nevbox);
+    install("/bin/cut",      nevbox);
+    install("/bin/tr",       nevbox);
+    install("/bin/rev",      nevbox);
+    install("/bin/pwd",      nevbox);
+    install("/bin/yes",      nevbox);
+    install("/bin/basename", nevbox);
+    install("/bin/dirname",  nevbox);
+    install("/bin/rm",       nevbox);
+    install("/bin/mv",       nevbox);
+    install("/bin/sleep",    nevbox);
 }
 
 fn install(path: []const u8, bytes: []const u8) void {

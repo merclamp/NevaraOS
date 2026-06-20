@@ -20,6 +20,9 @@ const SYS_exit: usize = 60;
 const SYS_getcwd: usize = 79;
 const SYS_chdir: usize = 80;
 const SYS_uptime: usize = 1001;
+const SYS_unlink: usize = 87;
+const SYS_rename: usize = 82;
+const SYS_sleep:  usize = 1002;
 
 
 inline fn syscall1(n: usize, a1: usize) usize {
@@ -107,6 +110,20 @@ pub fn chdir(path: [*:0]const u8) isize {
 /// Returns string length including null terminator on success, negative on error.
 pub fn getcwd(buf: []u8) isize {
     return @bitCast(syscall3(SYS_getcwd, @intFromPtr(buf.ptr), buf.len, 0));
+}
+/// unlink(): remove a file. Returns 0 on success, negative errno on failure.
+pub fn unlinkFile(path: [*:0]const u8) isize {
+    return @bitCast(syscall1(SYS_unlink, @intFromPtr(path)));
+}
+
+/// rename(): rename/move a file or directory. Returns 0 on success.
+pub fn renameFile(old: [*:0]const u8, new: [*:0]const u8) isize {
+    return @bitCast(syscall3(SYS_rename, @intFromPtr(old), @intFromPtr(new), 0));
+}
+
+/// sleep(): sleep for `seconds` seconds (yields to other processes).
+pub fn sleep(seconds: usize) void {
+    _ = syscall1(SYS_sleep, seconds);
 }
 
 /// uptimeTicks(): returns jiffies since boot (PIT at 100 Hz → divide by 100 for seconds).

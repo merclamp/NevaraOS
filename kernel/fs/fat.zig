@@ -502,3 +502,31 @@ pub fn mkdirIn(dir: Dir, name: []const u8) ?Entry {
     out.name_len = decode83(&short, &out.name);
     return out;
 }
+
+/// Mark the entry for `name` in `dir` as deleted (0xE5) and free its cluster chain.
+pub fn removeFileIn(dir: Dir, name: []const u8) bool {
+    if (!mounted) return false;
+    var short: [11]u8 = undefined;
+    encode83(name, &short);
+    const slot = findSlot(dir, &short) orelse return false;
+    // sbuf still holds the sector; free the chain then delete the entry
+    const cluster = rU16(&sbuf, slot.off + 26);
+    freeChain(cluster);
+    flushFat();
+    if (!ata.readSector(slot.lba, &sbuf)) return false;
+    sbuf[slot.off] = 0xE5; // FAT deleted-entry marker
+    return ata.writeSector(slot.lba, &sbuf);
+}
+
+/// Rename an existing file entry in `dir` from `old_name` to `new_name` (same dir).
+pub fn renameFileIn(dir: Dir, old_name: []const u8, new_name: []const u8) bool {
+    if (!mounted) return false;
+    var short_old: [11]u8 = undefined;
+    var short_new: [11]u8 = undefined;
+    encode83(old_name, &short_old);
+    encode83(new_name, &short_new);
+    const slot = findSlot(dir, &short_old) orelse return false;
+    // sbuf holds the sector; patch the 8.3 name in place
+    @memcpy(sbuf[slot.off .. slot.off + 11], &short_new);
+    return ata.writeSector(slot.lba, &sbuf);
+}

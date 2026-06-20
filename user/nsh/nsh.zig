@@ -22,6 +22,78 @@ export fn startMain(c: usize, v: [*]const ?[*:0]const u8) callconv(.c) noreturn 
 var line: [512]u8 = undefined;
 var line_len: usize = 0;
 
+// ---- shell variables -------------------------------------------------------
+
+const MAX_VARS  = 32;
+const VAR_NAME  = 32;
+const VAR_VAL   = 256;
+var vnames: [MAX_VARS][VAR_NAME]u8  = undefined;
+var vnlens: [MAX_VARS]usize         = .{0} ** MAX_VARS;
+var vvals:  [MAX_VARS][VAR_VAL]u8   = undefined;
+var vvlens: [MAX_VARS]usize         = .{0} ** MAX_VARS;
+var vcount: usize = 0;
+
+fn isVarChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+           (c >= '0' and c <= '9') or c == '_';
+}
+
+fn varGet(name: []const u8) ?[]const u8 {
+    for (0..vcount) |i| {
+        if (std.mem.eql(u8, vnames[i][0..vnlens[i]], name)) return vvals[i][0..vvlens[i]];
+    }
+    return null;
+}
+
+fn varSet(name: []const u8, val: []const u8) void {
+    for (0..vcount) |i| {
+        if (std.mem.eql(u8, vnames[i][0..vnlens[i]], name)) {
+            const l = @min(val.len, VAR_VAL);
+            @memcpy(vvals[i][0..l], val[0..l]);
+            vvlens[i] = l;
+            return;
+        }
+    }
+    if (vcount >= MAX_VARS) return;
+    const nl = @min(name.len, VAR_NAME);
+    @memcpy(vnames[vcount][0..nl], name[0..nl]);
+    vnlens[vcount] = nl;
+    const vl = @min(val.len, VAR_VAL);
+    @memcpy(vvals[vcount][0..vl], val[0..vl]);
+    vvlens[vcount] = vl;
+    vcount += 1;
+}
+
+/// Expand $VARNAME references in line[0..line_len] in-place.
+fn expandVars() void {
+    var out: [1024]u8 = undefined;
+    var o: usize = 0;
+    var i: usize = 0;
+    while (i < line_len) {
+        if (line[i] == '$' and i + 1 < line_len) {
+            i += 1;
+            const ns = i;
+            while (i < line_len and isVarChar(line[i])) i += 1;
+            const name = line[ns..i];
+            if (name.len > 0) {
+                if (varGet(name)) |val| {
+                    const n = @min(val.len, out.len - o);
+                    @memcpy(out[o .. o + n], val[0..n]);
+                    o += n;
+                }
+            } else {
+                if (o < out.len) { out[o] = '$'; o += 1; }
+            }
+        } else {
+            if (o < out.len) { out[o] = line[i]; o += 1; }
+            i += 1;
+        }
+    }
+    const copy = @min(o, line.len - 1);
+    @memcpy(line[0..copy], out[0..copy]);
+    line_len = copy;
+}
+
 // ---- pipeline descriptor ---------------------------------------------------
 
 const MAX_SEGS = 8;   // max commands in a pipeline
@@ -151,6 +223,9 @@ pub fn main() void {
             while (line_len > 0 and line[line_len - 1] == ' ') line_len -= 1;
         }
         line[line_len] = 0;
+        expandVars();  // expand $VAR before parsing
+        line[line_len] = 0;
+
 
         if (!parseLine(line_len)) continue;
 
@@ -158,6 +233,15 @@ pub fn main() void {
         if (std.mem.eql(u8, cmd, "exit")) return;
         if (std.mem.eql(u8, cmd, "help")) { help(); continue; }
         if (std.mem.eql(u8, cmd, "demo")) { demo(); continue; }
+        // VAR=value assignment (single word, valid identifier before '=').
+        if (nseg == 1 and segs[0].argc == 1) {
+            if (std.mem.indexOfScalar(u8, cmd, '=')) |eq_pos| {
+                const vn = cmd[0..eq_pos];
+                var valid = vn.len > 0 and (vn[0] < '0' or vn[0] > '9');
+                for (vn) |c| { if (!isVarChar(c)) { valid = false; break; } }
+                if (valid) { varSet(vn, cmd[eq_pos + 1..]); continue; }
+            }
+        }
         if (std.mem.eql(u8, cmd, "cd")) {
             const dest: [*:0]const u8 = segs[0].argv[1] orelse "/";
             if (nstd.chdir(dest) < 0) {
@@ -173,8 +257,10 @@ pub fn main() void {
 }
 
 fn help() void {
-    nstd.print("builtins: help, exit, demo, cd\n");
-    nstd.print("programs: echo cat ls mkfile mkdir wc grep head tail cp touch seq tee true false\n");
+    nstd.print("builtins: help, exit, demo, cd, VAR=value\n");
+    nstd.print("programs: echo cat ls cp mv rm touch mkfile mkdir sort uniq cut tr rev\n");
+    nstd.print("          wc grep head tail seq tee pwd yes basename dirname\n");
+    nstd.print("          true false sleep uptime uname nevfetch\n");
     nstd.print("pipeline: cmd1 | cmd2 | ...\n");
     nstd.print("redirect: cmd > file   cmd >> file   cmd < file\n");
     nstd.print("background: cmd &\n");

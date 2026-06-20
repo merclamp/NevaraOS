@@ -187,6 +187,19 @@ fn addChild(dir: *Node, child: *Node) Error!void {
     dir.child_count += 1;
     child.parent = dir;
 }
+/// Remove `child` from `dir`'s children slice (shifts remaining entries left).
+fn removeChild(dir: *Node, child: *Node) void {
+    var i: usize = 0;
+    while (i < dir.child_count) : (i += 1) {
+        if (dir.children[i] == child) {
+            var j = i;
+            while (j + 1 < dir.child_count) : (j += 1)
+                dir.children[j] = dir.children[j + 1];
+            dir.child_count -= 1;
+            return;
+        }
+    }
+}
 
 /// Find a direct child by name.
 pub fn lookup(dir: *Node, name: []const u8) ?*Node {
@@ -256,6 +269,44 @@ pub fn mkdev(path: []const u8, ops: *const DevOps) Error!*Node {
     const node = try create(path, .chardev);
     node.dev = ops;
     return node;
+}
+
+/// Delete a non-directory node at `path`, updating FAT if on disk.
+pub fn unlink(path: []const u8) Error!void {
+    const parts = splitParent(path);
+    if (parts.name.len == 0) return Error.Invalid;
+    const parent = try resolve(parts.parent);
+    if (parent.kind != .dir) return Error.NotDirectory;
+    if (parent.on_ext) return Error.NotSupported;
+    const node = lookup(parent, parts.name) orelse return Error.NotFound;
+    if (node.kind == .dir) return Error.IsDirectory;
+    if (node.on_disk) _ = fat.removeFileIn(fatDirOf(parent), node.name);
+    removeChild(parent, node);
+    alloc.free(node.name);
+    if (node.data.len > 0) alloc.free(node.data);
+    alloc.destroy(node);
+}
+
+/// Rename / move a node. Cross-directory FAT renames are not supported.
+pub fn rename(old_path: []const u8, new_path: []const u8) Error!void {
+    const op = splitParent(old_path);
+    const np = splitParent(new_path);
+    if (op.name.len == 0 or np.name.len == 0) return Error.Invalid;
+    const old_parent = try resolve(op.parent);
+    const new_parent = try resolve(np.parent);
+    if (old_parent.kind != .dir or new_parent.kind != .dir) return Error.NotDirectory;
+    if (old_parent.on_ext or new_parent.on_ext) return Error.NotSupported;
+    const node = lookup(old_parent, op.name) orelse return Error.NotFound;
+    if (lookup(new_parent, np.name) != null) return Error.Exists;
+    if (node.on_disk and old_parent != new_parent) return Error.NotSupported;
+    if (node.on_disk and node.kind == .file)
+        _ = fat.renameFileIn(fatDirOf(old_parent), op.name, np.name);
+    if (old_parent != new_parent) {
+        removeChild(old_parent, node);
+        try addChild(new_parent, node);
+    }
+    alloc.free(node.name);
+    node.name = try dupName(np.name);
 }
 
 /// Read up to `buf.len` bytes from `node` at `offset`.

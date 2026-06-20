@@ -35,6 +35,9 @@ const SYS_getcwd: usize = 79;
 const SYS_chdir: usize = 80;
 const SYS_spawn: usize = 1000;
 const SYS_uptime: usize = 1001;
+const SYS_unlink: usize = 87;
+const SYS_rename: usize = 82;
+const SYS_sleep:  usize = 1002;
 
 
 // errno values (returned negated).
@@ -372,6 +375,29 @@ fn sysGetcwd(buf_ptr: usize, size: usize) isize {
 
 /// Central dispatcher, invoked from the SYSCALL handler with a saved trap frame.
 /// Returns the value to place in the caller's rax (exit/execve do not return).
+fn sysUnlink(path_ptr: usize) isize {
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    vfs.unlink(path) catch |e| return errnoFor(e);
+    return 0;
+}
+
+fn sysRename(old_ptr: usize, new_ptr: usize) isize {
+    var obuf: [512]u8 = undefined;
+    var nbuf: [512]u8 = undefined;
+    const old_path = toAbsPath(cstr(old_ptr), &obuf) orelse return -EINVAL;
+    const new_path = toAbsPath(cstr(new_ptr), &nbuf) orelse return -EINVAL;
+    vfs.rename(old_path, new_path) catch |e| return errnoFor(e);
+    return 0;
+}
+
+/// Sleep for `seconds` seconds by yielding to the scheduler until jiffies advances.
+fn sysSleep(seconds: usize) isize {
+    const target = pit.jiffies + @as(u64, seconds) * 100;
+    while (pit.jiffies < target) sched.yield();
+    return 0;
+}
+
 pub fn handle(tf: *usermode.TrapFrame) isize {
     const num = tf.rax;
     const a1 = tf.rdi;
@@ -402,6 +428,9 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_getcwd => sysGetcwd(a1, a2),
         SYS_chdir => sysChdir(a1),
         SYS_uptime => @bitCast(pit.jiffies),
+        SYS_unlink => sysUnlink(a1),
+        SYS_rename => sysRename(a1, a2),
+        SYS_sleep  => sysSleep(a1),
         else => -ENOSYS,
     };
 }

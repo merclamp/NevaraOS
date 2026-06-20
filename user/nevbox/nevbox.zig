@@ -67,9 +67,22 @@ pub fn main() void {
     else if (eq(cmd, "uptime"))  appletUptime()
     else if (eq(cmd, "uname"))    appletUname()
     else if (eq(cmd, "nevfetch")) appletNevfetch()
+    else if (eq(cmd, "sort"))     appletSort()
+    else if (eq(cmd, "uniq"))     appletUniq()
+    else if (eq(cmd, "cut"))      appletCut()
+    else if (eq(cmd, "tr"))       appletTr()
+    else if (eq(cmd, "rev"))      appletRev()
+    else if (eq(cmd, "pwd"))      appletPwd()
+    else if (eq(cmd, "yes"))      appletYes()
+    else if (eq(cmd, "basename")) appletBasename()
+    else if (eq(cmd, "dirname"))  appletDirname()
+    else if (eq(cmd, "rm"))       appletRm()
+    else if (eq(cmd, "mv"))       appletMv()
+    else if (eq(cmd, "sleep"))    appletSleep()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
-                    "uptime uname nevfetch\n");
+                    "uptime uname nevfetch sort uniq cut tr rev " ++
+                    "pwd yes basename dirname rm mv sleep\n");
 
 }
 
@@ -677,4 +690,394 @@ fn appletNevfetch() void {
     // 8 bright colours
     nstd.print("  \x1b[100m   \x1b[101m   \x1b[102m   \x1b[103m   \x1b[104m   \x1b[105m   \x1b[106m   \x1b[107m   \x1b[0m\n");
     nstd.print("\n");
+}
+
+// ============================================================================
+// New applets: sort, uniq, cut, tr, rev, pwd, yes, basename, dirname, rm, mv, sleep
+// ============================================================================
+
+// ---- sort ------------------------------------------------------------------
+
+fn sortCmpLines(content: []u8, as: usize, al: usize, bs: usize, bl: usize) isize {
+    const min = @min(al, bl);
+    var i: usize = 0;
+    while (i < min) : (i += 1) {
+        if (content[as + i] < content[bs + i]) return -1;
+        if (content[as + i] > content[bs + i]) return  1;
+    }
+    if (al < bl) return -1;
+    if (al > bl) return  1;
+    return 0;
+}
+
+fn sortReadFd(fd: usize, content: []u8, starts: []usize, lens: []usize,
+              used: *usize, count: *usize) void {
+    var ibuf: [512]u8 = undefined;
+    var line_start: usize = used.*;
+    while (true) {
+        const n = nstd.read(fd, &ibuf);
+        if (n == 0) {
+            if (used.* > line_start and count.* < starts.len) {
+                starts[count.*] = line_start;
+                lens[count.*]   = used.* - line_start;
+                count.* += 1;
+            }
+            break;
+        }
+        for (ibuf[0..n]) |c| {
+            if (c == '\n') {
+                if (count.* < starts.len) {
+                    starts[count.*] = line_start;
+                    lens[count.*]   = used.* - line_start;
+                    count.* += 1;
+                }
+                line_start = used.*;
+            } else if (used.* < content.len) {
+                content[used.*] = c;
+                used.* += 1;
+            }
+        }
+    }
+}
+
+fn appletSort() void {
+    const a = nstd.allocator();
+    const MAX_BYTES: usize = 65536;
+    const MAX_LINES: usize = 4096;
+
+    const content  = a.alloc(u8,    MAX_BYTES) catch { nstd.print("sort: out of memory\n"); return; };
+    const starts   = a.alloc(usize, MAX_LINES) catch { nstd.print("sort: out of memory\n"); return; };
+    const lens_arr = a.alloc(usize, MAX_LINES) catch { nstd.print("sort: out of memory\n"); return; };
+
+    var rev_flag = false;
+    var file_start: usize = 1;
+    while (nstd.arg(file_start)) |f| {
+        if (eq(f, "-r")) { rev_flag = true; file_start += 1; } else break;
+    }
+
+    var used:  usize = 0;
+    var count: usize = 0;
+
+    if (nstd.argc() <= file_start) {
+        sortReadFd(0, content, starts, lens_arr, &used, &count);
+    } else {
+        var i: usize = file_start;
+        while (nstd.argZ(i)) |path| : (i += 1) {
+            const fd_raw = nstd.open(path, 0);
+            if (fd_raw < 0) { nstd.print("sort: cannot open "); nstd.print(nstd.arg(i).?); nstd.print("\n"); continue; }
+            sortReadFd(@intCast(fd_raw), content, starts, lens_arr, &used, &count);
+            nstd.close(@intCast(fd_raw));
+        }
+    }
+
+    // Insertion sort.
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        const ks = starts[i];
+        const kl = lens_arr[i];
+        var j: usize = i;
+        while (j > 0) {
+            const cmp = sortCmpLines(content, starts[j-1], lens_arr[j-1], ks, kl);
+            const should_shift = if (rev_flag) cmp < 0 else cmp > 0;
+            if (!should_shift) break;
+            starts[j]   = starts[j-1];
+            lens_arr[j] = lens_arr[j-1];
+            j -= 1;
+        }
+        starts[j]   = ks;
+        lens_arr[j] = kl;
+    }
+
+    for (0..count) |k| {
+        _ = nstd.write(1, content[starts[k] .. starts[k] + lens_arr[k]]);
+        _ = nstd.write(1, "\n");
+    }
+}
+
+// ---- uniq ------------------------------------------------------------------
+
+fn uniqFlush(line: []const u8, prev: *[2048]u8, prev_len: *usize, first: *bool) void {
+    const same = !first.* and
+        prev_len.* == line.len and
+        std.mem.eql(u8, prev[0..prev_len.*], line);
+    if (!same) {
+        _ = nstd.write(1, line);
+        _ = nstd.write(1, "\n");
+        const n = @min(line.len, prev.len);
+        @memcpy(prev[0..n], line[0..n]);
+        prev_len.* = n;
+    }
+    first.* = false;
+}
+
+fn uniqFd(fd: usize, prev: *[2048]u8, prev_len: *usize, first: *bool) void {
+    var ibuf: [256]u8 = undefined;
+    var cur: [2048]u8 = undefined;
+    var cl: usize = 0;
+    while (true) {
+        const n = nstd.read(fd, &ibuf);
+        if (n == 0) {
+            if (cl > 0) uniqFlush(cur[0..cl], prev, prev_len, first);
+            break;
+        }
+        for (ibuf[0..n]) |c| {
+            if (c == '\n') {
+                uniqFlush(cur[0..cl], prev, prev_len, first);
+                cl = 0;
+            } else if (cl < cur.len - 1) {
+                cur[cl] = c;
+                cl += 1;
+            }
+        }
+    }
+}
+
+fn appletUniq() void {
+    var prev: [2048]u8 = undefined;
+    var prev_len: usize = 0;
+    var first = true;
+    if (nstd.argc() <= 1) {
+        uniqFd(0, &prev, &prev_len, &first);
+    } else {
+        var i: usize = 1;
+        while (nstd.argZ(i)) |path| : (i += 1) {
+            const fd_raw = nstd.open(path, 0);
+            if (fd_raw < 0) { nstd.print("uniq: cannot open "); nstd.print(nstd.arg(i).?); nstd.print("\n"); continue; }
+            uniqFd(@intCast(fd_raw), &prev, &prev_len, &first);
+            nstd.close(@intCast(fd_raw));
+        }
+    }
+}
+
+// ---- cut -------------------------------------------------------------------
+
+fn cutField(line: []const u8, delim: u8, field: usize) void {
+    var f: usize = 1;
+    var i: usize = 0;
+    var start: usize = 0;
+    while (i <= line.len) : (i += 1) {
+        const boundary = (i == line.len) or (line[i] == delim);
+        if (boundary) {
+            if (f == field) {
+                _ = nstd.write(1, line[start..i]);
+                nstd.print("\n");
+                return;
+            }
+            f += 1;
+            start = i + 1;
+        }
+    }
+    nstd.print("\n"); // field not found
+}
+
+fn cutFd(fd: usize, delim: u8, field: usize) void {
+    var ibuf: [256]u8 = undefined;
+    var line: [2048]u8 = undefined;
+    var ll: usize = 0;
+    while (true) {
+        const n = nstd.read(fd, &ibuf);
+        if (n == 0) { if (ll > 0) cutField(line[0..ll], delim, field); break; }
+        for (ibuf[0..n]) |c| {
+            if (c == '\n') { cutField(line[0..ll], delim, field); ll = 0; }
+            else if (ll < line.len - 1) { line[ll] = c; ll += 1; }
+        }
+    }
+}
+
+fn appletCut() void {
+    var delim: u8 = '\t';
+    var field: usize = 1;
+    var file_start: usize = 1;
+    var i: usize = 1;
+    while (nstd.arg(i)) |a| : (i += 1) {
+        if (a.len >= 2 and a[0] == '-' and a[1] == 'd') {
+            if (a.len > 2) delim = a[2]
+            else if (nstd.arg(i + 1)) |d| { delim = if (d.len > 0) d[0] else '\t'; i += 1; }
+        } else if (a.len >= 2 and a[0] == '-' and a[1] == 'f') {
+            if (a.len > 2) field = parseNat(a[2..]) orelse 1
+            else if (nstd.arg(i + 1)) |fn_| { field = parseNat(fn_) orelse 1; i += 1; }
+        } else { file_start = i; break; }
+        file_start = i + 1;
+    }
+    if (nstd.argc() <= file_start) {
+        cutFd(0, delim, field);
+    } else {
+        var j: usize = file_start;
+        while (nstd.argZ(j)) |path| : (j += 1) {
+            const fd_raw = nstd.open(path, 0);
+            if (fd_raw < 0) { nstd.print("cut: cannot open "); nstd.print(nstd.arg(j).?); nstd.print("\n"); continue; }
+            cutFd(@intCast(fd_raw), delim, field);
+            nstd.close(@intCast(fd_raw));
+        }
+    }
+}
+
+// ---- tr --------------------------------------------------------------------
+
+fn appletTr() void {
+    var delete_mode = false;
+    var arg_start: usize = 1;
+
+    if (nstd.arg(1)) |a| {
+        if (eq(a, "-d")) { delete_mode = true; arg_start = 2; }
+    }
+
+    const set1 = nstd.arg(arg_start) orelse { nstd.print("usage: tr [-d] SET1 [SET2]\n"); return; };
+
+    // Build 256-entry translation table (0xFF = delete).
+    var table: [256]u8 = undefined;
+    for (0..256) |k| table[k] = @intCast(k);
+
+    if (delete_mode) {
+        for (set1) |c| table[c] = 0xFF;
+    } else {
+        const set2 = nstd.arg(arg_start + 1) orelse { nstd.print("tr: missing SET2\n"); return; };
+        const n = @min(set1.len, set2.len);
+        for (0..n) |k| table[set1[k]] = set2[k];
+        if (set1.len > set2.len and set2.len > 0) {
+            for (set2.len..set1.len) |k| table[set1[k]] = set2[set2.len - 1];
+        }
+    }
+
+    var ibuf: [512]u8 = undefined;
+    while (true) {
+        const n = nstd.read(0, &ibuf);
+        if (n == 0) break;
+        var obuf: [512]u8 = undefined;
+        var o: usize = 0;
+        for (ibuf[0..n]) |c| {
+            const t = table[c];
+            if (t != 0xFF) { obuf[o] = t; o += 1; }
+        }
+        if (o > 0) _ = nstd.write(1, obuf[0..o]);
+    }
+}
+
+// ---- rev -------------------------------------------------------------------
+
+fn revPrint(line: []u8) void {
+    var lo: usize = 0;
+    var hi: usize = line.len;
+    while (lo < hi) {
+        hi -= 1;
+        const tmp = line[lo];
+        line[lo] = line[hi];
+        line[hi] = tmp;
+        lo += 1;
+    }
+    _ = nstd.write(1, line);
+    _ = nstd.write(1, "\n");
+}
+
+fn revFd(fd: usize) void {
+    var ibuf: [256]u8 = undefined;
+    var line: [2048]u8 = undefined;
+    var ll: usize = 0;
+    while (true) {
+        const n = nstd.read(fd, &ibuf);
+        if (n == 0) { if (ll > 0) revPrint(line[0..ll]); break; }
+        for (ibuf[0..n]) |c| {
+            if (c == '\n') { revPrint(line[0..ll]); ll = 0; }
+            else if (ll < line.len - 1) { line[ll] = c; ll += 1; }
+        }
+    }
+}
+
+fn appletRev() void {
+    if (nstd.argc() <= 1) {
+        revFd(0);
+    } else {
+        var i: usize = 1;
+        while (nstd.argZ(i)) |path| : (i += 1) {
+            const fd_raw = nstd.open(path, 0);
+            if (fd_raw < 0) { nstd.print("rev: cannot open "); nstd.print(nstd.arg(i).?); nstd.print("\n"); continue; }
+            revFd(@intCast(fd_raw));
+            nstd.close(@intCast(fd_raw));
+        }
+    }
+}
+
+// ---- pwd -------------------------------------------------------------------
+
+fn appletPwd() void {
+    var buf: [256]u8 = undefined;
+    const n = nstd.getcwd(&buf);
+    if (n > 1) {
+        _ = nstd.write(1, buf[0..@intCast(n - 1)]);
+        nstd.print("\n");
+    } else {
+        nstd.print("/\n");
+    }
+}
+
+// ---- yes -------------------------------------------------------------------
+
+fn appletYes() void {
+    const s = nstd.arg(1) orelse "y";
+    while (true) {
+        nstd.print(s);
+        nstd.print("\n");
+    }
+}
+
+// ---- basename / dirname ----------------------------------------------------
+
+fn appletBasename() void {
+    const path = nstd.arg(1) orelse { nstd.print("usage: basename PATH [SUFFIX]\n"); return; };
+    var start: usize = 0;
+    for (path, 0..) |c, idx| if (c == '/') { start = idx + 1; };
+    var base = path[start..];
+    if (nstd.arg(2)) |suffix| {
+        if (base.len >= suffix.len and
+            std.mem.eql(u8, base[base.len - suffix.len ..], suffix))
+        {
+            base = base[0 .. base.len - suffix.len];
+        }
+    }
+    nstd.print(base);
+    nstd.print("\n");
+}
+
+fn appletDirname() void {
+    const path = nstd.arg(1) orelse { nstd.print("usage: dirname PATH\n"); return; };
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |pos| {
+        if (pos == 0) nstd.print("/\n")
+        else { nstd.print(path[0..pos]); nstd.print("\n"); }
+    } else {
+        nstd.print(".\n");
+    }
+}
+
+// ---- rm --------------------------------------------------------------------
+
+fn appletRm() void {
+    if (nstd.argc() < 2) { nstd.print("usage: rm file...\n"); return; }
+    var i: usize = 1;
+    while (nstd.argZ(i)) |path| : (i += 1) {
+        if (nstd.unlinkFile(path) < 0) {
+            nstd.print("rm: cannot remove ");
+            nstd.print(nstd.arg(i).?);
+            nstd.print("\n");
+        }
+    }
+}
+
+// ---- mv --------------------------------------------------------------------
+
+fn appletMv() void {
+    if (nstd.argc() < 3) { nstd.print("usage: mv src dst\n"); return; }
+    const src = nstd.argZ(1).?;
+    const dst = nstd.argZ(2).?;
+    if (nstd.renameFile(src, dst) < 0) {
+        nstd.print("mv: cannot rename ");
+        nstd.print(std.mem.span(src));
+        nstd.print("\n");
+    }
+}
+
+// ---- sleep -----------------------------------------------------------------
+
+fn appletSleep() void {
+    const n = parseNat(nstd.arg(1) orelse "0") orelse 0;
+    nstd.sleep(n);
 }
