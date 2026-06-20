@@ -234,6 +234,12 @@ pub fn build(b: *std.Build) void {
         "test -f zig-out/disk.img || { mkdir -p zig-out && dd if=/dev/zero of=zig-out/disk.img bs=1M count=16; }",
     });
 
+    // Create a small ext4 disk (read by the kernel) populated with test files.
+    const mkext = b.addSystemCommand(&.{
+        "sh", "-c",
+        "test -f zig-out/ext.img || { mkdir -p zig-out/extsrc/docs && printf 'hello from ext4\\n' > zig-out/extsrc/readme.txt && printf 'nested ext4 file\\n' > zig-out/extsrc/docs/note.txt && mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^dir_index -d zig-out/extsrc zig-out/ext.img 8192; }",
+    });
+
     const run = b.addSystemCommand(&.{"qemu-system-x86_64"});
     run.addArg("-cdrom");
     run.addFileArg(iso_file);
@@ -244,8 +250,10 @@ pub fn build(b: *std.Build) void {
         "-vga",       "std",
         "-boot",      "d", // boot from the CD-ROM (the FAT disk is data only)
         "-drive",     "file=zig-out/disk.img,format=raw,if=ide,index=0,media=disk",
+        "-drive",     "file=zig-out/ext.img,format=raw,if=ide,index=1,media=disk",
     });
     run.step.dependOn(&mkdisk.step);
+    run.step.dependOn(&mkext.step);
     const run_step = b.step("run", "Boot Nevara OS in QEMU");
     run_step.dependOn(&run.step);
 }

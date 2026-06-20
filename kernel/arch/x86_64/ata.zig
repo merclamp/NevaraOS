@@ -30,7 +30,7 @@ const CMD_READ: u8 = 0x20;
 const CMD_WRITE: u8 = 0x30;
 const CMD_FLUSH: u8 = 0xE7;
 
-var present: bool = false;
+var present: [2]bool = .{ false, false }; // [0]=master, [1]=slave
 
 inline fn outb(port: u16, value: u8) void {
     asm volatile ("outb %[v], %[p]"
@@ -88,9 +88,11 @@ fn waitDataReady() bool {
     return false;
 }
 
-fn selectLba(lba: u32, count: u8) void {
+fn selectLba(drive: u1, lba: u32, count: u8) void {
     _ = waitNotBusy();
-    outb(DRIVE, 0xE0 | @as(u8, @intCast((lba >> 24) & 0x0F))); // LBA, master
+    // 0xE0 = LBA mode + master; 0xF0 selects the slave.
+    const sel: u8 = 0xE0 | (@as(u8, drive) << 4) | @as(u8, @intCast((lba >> 24) & 0x0F));
+    outb(DRIVE, sel);
     delay400ns();
     outb(SECCOUNT, count);
     outb(LBA_LO, @intCast(lba & 0xFF));
@@ -98,29 +100,33 @@ fn selectLba(lba: u32, count: u8) void {
     outb(LBA_HI, @intCast((lba >> 16) & 0xFF));
 }
 
-/// Detect the primary master. Returns false if no drive responds.
-pub fn init() bool {
+fn probe(drive: u1) bool {
     _ = waitNotBusy();
-    outb(DRIVE, 0xE0);
+    outb(DRIVE, 0xE0 | (@as(u8, drive) << 4));
     delay400ns();
     const s = inb(STATUS);
-    present = (s != 0xFF and s != 0x00);
-    if (present) {
-        console.writeString("[ata] primary master present\n");
-    } else {
-        console.writeString("[ata] no primary master drive\n");
-    }
-    return present;
+    return s != 0xFF and s != 0x00;
+}
+
+/// Detect the primary master and slave. Returns whether the master is present.
+pub fn init() bool {
+    present[0] = probe(0);
+    present[1] = probe(1);
+    console.writeString(if (present[0]) "[ata] primary master present\n" else "[ata] no primary master\n");
+    if (present[1]) console.writeString("[ata] primary slave present\n");
+    return present[0];
 }
 
 pub fn isPresent() bool {
-    return present;
+    return present[0];
+}
+pub fn isPresentOn(drive: u1) bool {
+    return present[drive];
 }
 
-/// Read one 512-byte sector at `lba` into `buf`. Returns false on error.
-pub fn readSector(lba: u32, buf: *[SECTOR_SIZE]u8) bool {
-    if (!present) return false;
-    selectLba(lba, 1);
+fn readImpl(drive: u1, lba: u32, buf: *[SECTOR_SIZE]u8) bool {
+    if (!present[drive]) return false;
+    selectLba(drive, lba, 1);
     outb(COMMAND, CMD_READ);
     if (!waitDataReady()) return false;
     var i: usize = 0;
@@ -132,10 +138,9 @@ pub fn readSector(lba: u32, buf: *[SECTOR_SIZE]u8) bool {
     return true;
 }
 
-/// Write one 512-byte sector `buf` to `lba`. Returns false on error.
-pub fn writeSector(lba: u32, buf: *const [SECTOR_SIZE]u8) bool {
-    if (!present) return false;
-    selectLba(lba, 1);
+fn writeImpl(drive: u1, lba: u32, buf: *const [SECTOR_SIZE]u8) bool {
+    if (!present[drive]) return false;
+    selectLba(drive, lba, 1);
     outb(COMMAND, CMD_WRITE);
     if (!waitDataReady()) return false;
     var i: usize = 0;
@@ -143,8 +148,20 @@ pub fn writeSector(lba: u32, buf: *const [SECTOR_SIZE]u8) bool {
         const w = @as(u16, buf[i * 2]) | (@as(u16, buf[i * 2 + 1]) << 8);
         outw(DATA, w);
     }
-    // Flush the write cache.
     outb(COMMAND, CMD_FLUSH);
     _ = waitNotBusy();
     return true;
+}
+
+/// Read/write one 512-byte sector on the primary master (drive 0).
+pub fn readSector(lba: u32, buf: *[SECTOR_SIZE]u8) bool {
+    return readImpl(0, lba, buf);
+}
+pub fn writeSector(lba: u32, buf: *const [SECTOR_SIZE]u8) bool {
+    return writeImpl(0, lba, buf);
+}
+
+/// Read one sector from an explicit drive (0 = master, 1 = slave).
+pub fn readSectorOn(drive: u1, lba: u32, buf: *[SECTOR_SIZE]u8) bool {
+    return readImpl(drive, lba, buf);
 }

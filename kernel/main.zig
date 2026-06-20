@@ -72,6 +72,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         _ = ata.init();
         vfs.mountFat(); // mount (or format) the FAT16 disk at /mnt
         writeBootFile();
+        vfs.mountExt4(); // mount the ext4 disk read-only at /ext
         usermode.init();
         process.init(); // scheduler + the kernel (kmain) process, stdio bound
         installBinaries();

@@ -49,12 +49,12 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   C library (**ZLibc**) — all written in Zig, no external libc.
 - An interactive shell (**nsh**) fed by a PS/2 keyboard through `/dev/console`,
   launching BusyBox-style applets (`echo`, `cat`, `ls`) on demand.
-- Reads and writes a real disk: an ATA driver and a FAT16 filesystem mounted at
-  `/mnt`, interoperable with `fsck.fat` / mtools on the host.
+- Reads and writes a real disk: **FAT16** at `/mnt` (subdirectories, mkfile,
+  mkdir) interoperable with fsck.fat / mtools; **ext4** at `/ext` (read-only).
 
 ## Current status
 
-Eight foundational stages are done and verified in QEMU:
+Nine foundational stages are done and verified in QEMU:
 
 - ✅ **Boot & bring-up** — boots through GRUB into 64-bit mode, sets up the CPU
   (segments, interrupt/exception handling), reads the machine's memory layout,
@@ -80,20 +80,19 @@ Eight foundational stages are done and verified in QEMU:
   between them, and **nsh** runs commands the Unix way (fork + exec + wait), with
   background jobs via a trailing `&`. The `demo` builtin forks two children whose
   output interleaves to show preemption.
-- ✅ **Real disk storage** — an ATA (IDE) PIO block driver and a **FAT16** driver:
-  the disk mounts at `/mnt` (formatting a fresh one), files read and write through
-  the normal VFS, and they persist across reboots. The on-disk format is genuine
-  FAT16 — images round-trip with `fsck.fat` / mtools on the host. `mkfile` creates
-  files from the shell.
+- ✅ **Real disk storage (FAT16 + ext4)** — an ATA (IDE) PIO block driver feeds
+  two filesystems. **FAT16** mounts at `/mnt`: full read/write with
+  subdirectories, `mkfile`/`mkdir` from the shell, persistent across reboots,
+  host-interoperable with `fsck.fat` / mtools. **ext4** mounts read-only at
+  `/ext`: extent-based files, linear directories, and subdirectories — produced
+  by `mke2fs` on the host, read transparently by the kernel.
 
 ## Roadmap
 
 What still needs to be built (roughly in order):
 
-- ⏳ **Native filesystem & subdirectories** — FAT subdirectories, then a richer
-  native filesystem.
-- ⏳ **More userland** — more NevBox applets, a richer ZLibc, pipes and
-  redirection in nsh.
+- ⏳ **Pipes & redirection** — `cat /mnt/x > /mnt/y`, `cmd1 | cmd2` in nsh.
+- ⏳ **More userland** — more NevBox applets, a richer ZLibc.
 - ⏳ **Polish** — networking, a native filesystem, users & permissions, a
   package manager, and more.
 
@@ -178,14 +177,17 @@ the PIT fires IRQ0 at 100 Hz to drive round-robin preemption.
 
 **Filesystem & system calls.** A virtual filesystem layer backs an in-memory
 (tmpfs-style) tree of files, directories, and character devices (`/dev/null`,
-`/dev/zero`, `/dev/console`); files grow their buffers from the heap. A real disk
-is supported too: an ATA (IDE) PIO block driver (`ata.zig`) under a FAT16 driver
-(`fat.zig`) mounts at `/mnt` — it parses an existing volume's BPB or formats a
-fresh 16 MiB one, and reads/writes files through the same VFS nodes (loaded lazily
-on read, flushed to disk on write). The on-disk layout is genuine FAT16, so images
-round-trip with host tools. On top sits a per-process file-descriptor table and a
-dispatcher keyed by the Linux x86_64 syscall numbers (read, write, open, close,
-lseek, getpid, brk, mkdir, getdents64, ...), returning negative errno on failure.
+is supported too: an ATA (IDE) PIO block driver (`ata.zig`) addresses two IDE
+disks (master and slave). A FAT16 driver (`fat.zig`) mounts at `/mnt`: it parses
+an existing volume's BPB or formats a fresh 16 MiB one, supports nested
+subdirectories (cluster chains + dot/dotdot entries), reads/writes files lazily
+through VFS nodes, and produces genuine FAT16 images that round-trip with host
+tools. A read-only ext4 driver (`ext4.zig`) mounts at `/ext`: it reads the
+superblock, block-group descriptors, inodes, and extent trees, and presents files
+and subdirectories through the same VFS. On top sits a per-process
+file-descriptor table and a dispatcher keyed by the Linux x86_64 syscall numbers
+(read, write, open, close, lseek, getpid, brk, mkdir, getdents64, ...), returning
+negative errno on failure.
 
 **Input & TTY.** A PS/2 keyboard driver (`kbd.zig`) is wired to IRQ1: it reads
 scancodes from port 0x60, tracks Shift/Ctrl/Caps Lock, decodes the 0xE0 extended
@@ -223,7 +225,7 @@ kernel/
   arch/x86_64/       boot trampoline, GDT/IDT, serial, framebuffer terminal, PS/2 keyboard, ATA
   mm/                pmm, vmm, heap
   proc/              scheduler, kernel threads, and the process model
-  fs/                VFS (in-memory tmpfs + devices) and the FAT16 disk driver
+  fs/                VFS (in-memory tmpfs + devices), FAT16, and ext4 drivers
   syscall/           file descriptors and the syscall dispatcher
   exec/elf.zig       ELF64 loader
   lib/c.zig          freestanding mem builtins

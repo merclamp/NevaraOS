@@ -11,6 +11,7 @@ const heap = @import("../mm/heap.zig");
 const console = @import("../arch/x86_64/console.zig");
 const tty = @import("../tty.zig");
 const fat = @import("fat.zig");
+const ext4 = @import("ext4.zig");
 
 pub const Error = error{
     NotFound,
@@ -50,6 +51,10 @@ pub const Node = struct {
     // written back to disk on every write.
     on_disk: bool = false,
     cluster: u16 = 0,
+
+    // Read-only ext4 file/dir: lazily loaded into `data` on first read.
+    on_ext: bool = false,
+    ext_ino: u32 = 0,
 };
 
 var alloc: std.mem.Allocator = undefined;
@@ -95,6 +100,37 @@ pub fn mountFat() void {
     mount_root = m;
     populate(m, fat.root());
     console.writeString("[fat] /mnt mounted\n");
+}
+
+/// Load a read-only ext4 file's contents into memory on first access.
+fn loadExt(node: *Node) void {
+    const buf = alloc.alloc(u8, node.size) catch return;
+    _ = ext4.readFile(node.ext_ino, buf);
+    node.data = buf;
+}
+
+/// Recursively populate `dirnode` from ext4 directory inode `ino`.
+fn populateExt(dirnode: *Node, ino: u32) void {
+    var i: usize = 0;
+    while (ext4.entryAt(ino, i)) |e| : (i += 1) {
+        const kind: Kind = if (e.is_dir) .dir else .file;
+        const node = makeNode(kind, e.name[0..e.name_len]) catch return;
+        node.on_ext = true;
+        node.ext_ino = e.ino;
+        if (!e.is_dir) node.size = ext4.sizeOf(e.ino);
+        addChild(dirnode, node) catch return;
+        if (e.is_dir) populateExt(node, e.ino);
+    }
+}
+
+/// Mount the ext4 disk read-only at /ext.
+pub fn mountExt4() void {
+    if (!ext4.mount()) return;
+    const m = mkdir("/ext") catch return;
+    m.on_ext = true;
+    m.ext_ino = 2; // root inode
+    populateExt(m, 2);
+    console.writeString("[ext4] /ext mounted (read-only)\n");
 }
 
 fn dupName(s: []const u8) Error![]u8 {
@@ -160,6 +196,7 @@ pub fn create(path: []const u8, kind: Kind) Error!*Node {
     if (parts.name.len == 0) return Error.Invalid;
     const parent = try resolve(parts.parent);
     if (parent.kind != .dir) return Error.NotDirectory;
+    if (parent.on_ext) return Error.NotSupported; // /ext is read-only
     if (lookup(parent, parts.name) != null) return Error.Exists;
     const node = try makeNode(kind, parts.name);
     try addChild(parent, node);
@@ -198,6 +235,7 @@ pub fn readAt(node: *Node, buf: []u8, offset: usize) Error!usize {
         .chardev => return (node.dev orelse return Error.NotSupported).read(buf),
         .file => {
             if (node.on_disk and node.data.len == 0 and node.size > 0) loadDisk(node);
+            if (node.on_ext and node.data.len == 0 and node.size > 0) loadExt(node);
             if (offset >= node.size) return 0;
             const n = @min(buf.len, node.size - offset);
             @memcpy(buf[0..n], node.data[offset .. offset + n]);
@@ -223,6 +261,7 @@ pub fn writeAt(node: *Node, buf: []const u8, offset: usize) Error!usize {
             }
             @memcpy(node.data[offset..end], buf);
             if (end > node.size) node.size = end;
+            if (node.on_ext) return Error.NotSupported; // read-only ext4
             if (node.on_disk and node.parent != null)
                 _ = fat.writeFileIn(fatDirOf(node.parent.?), node.name, node.data[0..node.size]);
             return buf.len;
