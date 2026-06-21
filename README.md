@@ -5,7 +5,7 @@
 > boots, sets up the CPU, manages memory, and drops into an interactive shell
 > driven by a PS/2 keyboard. Expect breaking changes, rewrites, and rough edges.
 
-🇬🇧 English · [🇷🇺 Русский](README.ru.md)
+English · [Русский](README.ru.md)
 
 ---
 
