@@ -59,9 +59,15 @@ stack_top:
 .global _start
 .type _start, @function
 _start:
+    /* ---- Diagnostic: write 'N' to VGA cell 0 in 32-bit mode.
+     * If this appears, GRUB handed us control successfully.
+     * Yellow-on-black (attr=0x0E) so it's unmissable. */
+    movl  $0x0E4E, %eax       /* 'N' with yellow attr */
+    movl  $0xB8000, %ecx
+    movw  %ax, (%ecx)
+
     /* GRUB: eax = multiboot2 magic, ebx = info struct address.
-     * Stash them in edi/esi so they survive into the 64-bit ABI
-     * (rdi = arg0, rsi = arg1). 32-bit writes zero the upper dword. */
+     * Stash them in edi/esi so they survive into the 64-bit ABI. */
     movl %eax, %edi
     movl %ebx, %esi
 
@@ -102,6 +108,11 @@ _start:
     movl $p4_table, %eax
     movl %eax, %cr3
 
+    /* Diagnostic: 'A' at VGA cell 1 = CR3 set, entering paging setup */
+    movl  $0x0E41, %eax
+    movl  $0xB8002, %ecx
+    movw  %ax, (%ecx)
+
     /* CR4.PAE = 1 */
     movl %cr4, %eax
     orl  $(1 << 5), %eax
@@ -118,6 +129,11 @@ _start:
     orl  $(1 << 31), %eax
     movl %eax, %cr0
 
+    /* Diagnostic: 'R' at VGA cell 2 = paging on, about to ljmp */
+    movl  $0x0E52, %eax
+    movl  $0xB8004, %ecx
+    movw  %ax, (%ecx)
+
     /* Load 64-bit GDT and far-jump to flush into true 64-bit mode */
     lgdt gdt64_pointer
     ljmp $0x08, $long_mode_start
@@ -126,6 +142,11 @@ _start:
 .code64
 .type long_mode_start, @function
 long_mode_start:
+    /* Diagnostic: '!' at VGA cell 3 = reached 64-bit mode */
+    movq  $0x0E21, %rax
+    movq  $0xB8006, %rcx
+    movw  %ax, (%rcx)
+
     /* Reload data segment registers with the null selector (flat model) */
     xorw %ax, %ax
     movw %ax, %ds
