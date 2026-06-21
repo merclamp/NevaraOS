@@ -61,10 +61,12 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   files beyond ~4 MiB), block/inode allocation, directory entry management,
   inode timestamps, and file-permission bits with `chmod` — no journal, no
   checksums (matching the mke2fs flags used to build the image).
-- **30+ NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
+- **45+ NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
   `mv` `rm` `touch` `mkfile` `mkdir` `sort` `uniq` `cut` `tr` `rev` `pwd`
   `yes` `basename` `dirname` `seq` `tee` `true` `false` `sleep` `uptime`
-  `uname` `nevfetch` `chmod` — all in one multi-call binary, no libc.
+  `uname` `nevfetch` `chmod` `find` `stat` `strings` `fold` `comm` `printf`
+  `which` `xargs` `ln` `env` `dd` `od` `nl` `du` — all in one multi-call
+  binary, no libc.
 
 ## Current status
 
@@ -113,10 +115,13 @@ Twelve foundational stages are done and verified in QEMU:
 - ✅ **Working directory & relative paths** — every process tracks its own cwd
   (`chdir`/`getcwd` syscalls, Linux numbers 80/79). All path-taking syscalls
   resolve relative paths against the cwd with full `.`/`..` normalisation.
-- ✅ **Rich userland tooling** — **NevBox** provides 30+ applets covering text
-  processing, file management, and system info. Shell variables (`FOO=bar`,
-  `$FOO` expansion) work in **nsh**. The PIT exports a 100 Hz `jiffies` counter
-  (`SYS_uptime = 1001`) so `uptime` and `nevfetch` show real elapsed time.
+- ✅ **Rich userland tooling** — **NevBox** provides 45+ applets covering text
+  processing, file management, system info, and binary inspection (`find`,
+  `stat`, `strings`, `dd`, `od`, `du`, `nl`, `fold`, `comm`, `printf`,
+  `which`, `xargs`, `ln`, `env`, and more). Shell variables (`FOO=bar`,
+  `$FOO` expansion) work in **nsh**. The PIT exports a 100 Hz `jiffies`
+  counter (`SYS_uptime = 1001`) so `uptime` and `nevfetch` show real elapsed
+  time.
 
 ## Roadmap
 
@@ -128,7 +133,9 @@ What still needs to be built (roughly in order):
 - ✅ **Richer ZLibc** — `ctype.h` (12 functions), `string.h` (20 functions),
   `stdlib.h` (13 functions), `stdio.h` with full `printf`/`sprintf`/`snprintf`/
   `sscanf`/`scanf`, `calloc`/`realloc`, `strtol`/`strtoul`, `strtok`, and more.
-- ⏳ **More userland** — additional NevBox applets (`find`, …).
+- ✅ **More NevBox applets** — `find`, `stat`, `strings`, `fold`, `comm`,
+  `printf`, `which`, `xargs`, `ln`, `env`, `dd`, `od`, `nl`, `du` (15 new
+  applets; total now 45+).
 - ⏳ **Polish** — networking, users & permissions, a package manager, and more.
 
 This is a marathon, not a sprint. Progress happens phase by phase.

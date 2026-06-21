@@ -218,7 +218,8 @@ pub fn build(b: *std.Build) void {
         \\cp "$INIT"   "$ROOTFS/bin/init"
         \\for APP in echo cat ls mkfile mkdir wc grep head tail cp touch seq tee \
         \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
-        \\           yes basename dirname rm mv sleep; do
+        \\           yes basename dirname rm mv sleep chmod \
+        \\           find stat strings fold comm printf which xargs ln env dd od nl du; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
         \\printf 'nevara\n' > "$ROOTFS/etc/hostname"
