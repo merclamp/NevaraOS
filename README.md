@@ -127,12 +127,14 @@ Twelve foundational stages are done and verified in QEMU:
   for user home dirs; `useradd`/`userdel`/`su`/`whoami`/`id` applets;
   `getuid`/`setuid`/`getgid`/`setgid` and custom `useradd`/`userdel`/
   `getpwnam` syscalls; **nsh** prompt shows `user@nevara:path` with colour.
-- ⚙️  **Networking (implemented, pending end-to-end test)** — PCI scanner,
-  RTL8139 driver (IRQ-driven RX, 32-bit DMA via `pmm.allocLow32`),
-  Ethernet/ARP/IPv4/ICMP/UDP stack; static IP 10.0.2.15/24, GW 10.0.2.2
-  (QEMU SLIRP). `ping` and `ifconfig` NevBox applets; `net_ping`/
-  `net_send`/`net_recv`/`net_info` syscalls. `zig build run` adds
+- ✅ **Networking (end-to-end verified)** — PCI scanner, RTL8139 driver
+  (IRQ-driven RX, 32-bit DMA via `pmm.allocLow32`), Ethernet/ARP/IPv4/ICMP/UDP
+  stack; static IP 10.0.2.15/24, GW 10.0.2.2 (QEMU SLIRP). `ping` and
+  `ifconfig` NevBox applets; `net_ping`/`net_send`/`net_recv`/`net_info`
+  syscalls. End-to-end verified: `ping -c 3 10.0.2.2` → 3/3 received, ARP
+  cache populated, IRQ11 routing confirmed. `zig build run` adds
   `-netdev user -device rtl8139` to QEMU automatically.
+
 
 ## Roadmap
 
@@ -150,7 +152,8 @@ Everything below has been built and verified in QEMU:
 | Shell | Pipelines, I/O redirect, background jobs, shell variables, history |
 | NevBox | 50+ applets (echo cat ls wc grep find dd ping ifconfig whoami …) |
 | Users | uid/gid/euid/egid per-process, user DB → /etc/passwd, useradd/userdel/su |
-| Networking | PCI scan, RTL8139 + DMA fix, ARP/IPv4/ICMP/UDP, ping, ifconfig |
+| Networking | PCI scan, RTL8139 + DMA fix, ARP/IPv4/ICMP/UDP, ping 3/3 e2e ✓ |
+
 | TTY | Canonical + raw mode (SYS_tty_mode=1020), ANSI/VT100 terminal |
 
 ---
@@ -163,9 +166,9 @@ services, with the desktop as the final milestone.
 
 #### II-A · Finish Phase I loose ends
 
-- ⏳ **Networking end-to-end test** — verify `ping 10.0.2.2` gets an ICMP
-  reply from QEMU SLIRP; confirm ARP cache is populated; UDP round-trip echo.
-  Fix any remaining issues in `pollRx` / RX ring wrap-around / ISR routing.
+- ✅ **Networking end-to-end test** — `ping -c 3 10.0.2.2` → 3/3 received from
+  QEMU SLIRP; ARP cache populated; IRQ11 confirmed. Done.
+
 - ⏳ **TCP stack** — implement TCP (SYN/ACK state machine, retransmit timer,
   sliding window); expose `connect`/`accept`/`send`/`recv` as BSD-socket-style
   syscalls (`SYS_socket=41`, `SYS_connect=42`, `SYS_accept=43`, etc.).
@@ -288,17 +291,17 @@ You will need: **Zig 0.16+**, **QEMU**, **GRUB** (`grub-mkrescue`),
 **xorriso**, **LLD** (`ld.lld`), and **e2fsprogs** (`mke2fs`).
 
 ```sh
+
 zig build          # compile the kernel (zig-out/bin/kernel)
-zig build iso      # build a bootable ISO (zig-out/nevara.iso)
-                   # also produces zig-out/rootfs.ext4
+zig build iso      # build bootable ISO (zig-out/nevara.iso + zig-out/rootfs.ext4)
 zig build run      # build, populate rootfs, and boot in QEMU
 ```
 
 **To boot the ISO** you also need `zig-out/rootfs.ext4` as a separate ATA
-disk. `zig build run` handles this automatically by copying the rootfs image
-from the build cache. `zig-out/bin/kernel` is **not** required at runtime —
-the kernel is embedded inside the ISO at `/boot/kernel`.
-
+disk. Both `zig build iso` and `zig build run` produce it automatically —
+`zig build iso` copies the rootfs image to `zig-out/rootfs.ext4` alongside
+the ISO. `zig-out/bin/kernel` is **not** required at runtime — the kernel is
+embedded inside the ISO at `/boot/kernel`.
 You can boot `zig-out/nevara.iso` + `zig-out/rootfs.ext4` in VirtualBox,
 virt-manager, or on real hardware. Use a BIOS or UEFI machine with a standard
 VGA/QXL/virtio display.
@@ -341,6 +344,7 @@ linked in. The `zig build iso` step:
 2. Assembles a rootfs staging directory with `/bin`, `/etc`, `/tmp`, `/mnt`.
 3. Runs `mke2fs` to produce `rootfs.ext4` (no journal, no checksums, 1 KiB blocks).
 4. Packs kernel + rootfs + GRUB config into a single ISO via `grub-mkrescue`.
+5. Copies `rootfs.ext4` to `zig-out/` alongside the ISO for convenient QEMU use.
 
 **Display.** The kernel requests a linear RGB framebuffer (1024×768×32) via the
 Multiboot2 header and drives it as a small ANSI/VT100 terminal: a colour cell
