@@ -18,13 +18,14 @@ pub const Framebuffer = struct {
     bpp: u8,
 };
 
-const SCALE: usize = 2; // 8×8 font scaled 2× → 16×16 px per glyph
-const GLYPH_W: usize = 8 * SCALE; // 16 px wide
-const GLYPH_H: usize = 8 * SCALE; // 16 px tall
+const SCALE:   usize = 1;  // native pixels — no scaling
+const GLYPH_W: usize = 8;  // 8 px wide
+const GLYPH_H: usize = 16; // 16 px tall (VGA 8×16 font)
 
-// 800×600 at 16×16: 50 cols × 37 rows.
-const MAX_COLS: usize = 55;
+// 800×600 at 8×16: 100 cols × 37 rows.
+const MAX_COLS: usize = 105;
 const MAX_ROWS: usize = 40;
+
 
 /// 16-colour ANSI palette (0-7 normal, 8-15 bright). Index 0 is pure black so
 /// the default terminal background is black, not tinted.
@@ -120,22 +121,17 @@ inline fn cellAt(x: usize, y: usize) *Cell {
 }
 
 /// Draw a single glyph cell with explicit foreground/background colours.
+/// Font is VGA 8×16, MSB = leftmost pixel.
 fn drawGlyph(ch: u8, ox: usize, oy: usize, fg: u32, bg: u32) void {
     const glyph = font.basic[ch & 0x7F];
     var gy: usize = 0;
-    while (gy < 8) : (gy += 1) {
+    while (gy < GLYPH_H) : (gy += 1) {
         const bits = glyph[gy];
         var gx: usize = 0;
-        while (gx < 8) : (gx += 1) {
-            const on = (bits >> @as(u3, @intCast(gx))) & 1 != 0;
-            const color: u32 = if (on) fg else bg;
-            var sy: usize = 0;
-            while (sy < SCALE) : (sy += 1) {
-                var sx: usize = 0;
-                while (sx < SCALE) : (sx += 1) {
-                    pixelPtr(ox + gx * SCALE + sx, oy + gy * SCALE + sy).* = color;
-                }
-            }
+        while (gx < GLYPH_W) : (gx += 1) {
+            // MSB first: bit 7 is leftmost pixel.
+            const on = (bits >> @as(u3, @intCast(7 - gx))) & 1 != 0;
+            pixelPtr(ox + gx, oy + gy).* = if (on) fg else bg;
         }
     }
 }

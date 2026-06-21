@@ -28,8 +28,8 @@ export fn startMain(c: usize, v: [*]const ?[*:0]const u8) callconv(.c) noreturn 
     nstd.start(c, v);
 }
 
-// ---- Screen dimensions (800×600, SCALE=2 → 16×16 glyphs → 50×37 cells) ---
-const SCREEN_COLS: usize = 50;
+// ---- Screen dimensions (800×600, VGA 8×16 font → 100×37 cells) ------------
+const SCREEN_COLS: usize = 100;
 const SCREEN_ROWS: usize = 37;
 const EDIT_ROWS: usize = SCREEN_ROWS - 2; // top status + bottom status
 
