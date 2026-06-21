@@ -300,85 +300,71 @@ fn render(ed: *Editor) void {
     if (cur_line >= ed.top_line + EDIT_ROWS)
         ed.top_line = cur_line - EDIT_ROWS + 1;
 
-    // Full clear every frame — eliminates all artifact squares.
-    // fbterm's eraseToEol leaves pixel-level garbage; clearScreen doesn't.
-    obStr("\x1b[2J");
+    // Reset SGR to normal BEFORE drawing anything.
+    // This ensures eraseToEol uses black background, not inverted.
+    normalVideo();
 
     // ---- Top status bar (row 0) ----
     moveCursor(0, 0);
     invertVideo();
     const fname = ed.filename orelse "[No Name]";
     const dirty_mark: []const u8 = if (ed.dirty) "[+]" else "   ";
-    var top_col: usize = 0;
-    top_col += obPadStr(" nved | ");
-    top_col += obPadStr(fname);
-    top_col += obPadStr(" ");
-    top_col += obPadStr(dirty_mark);
-    top_col += obPadStr(" ");
+    obFmt(" nved | {s} {s} ", .{ fname, dirty_mark });
+    var top_col: usize = 9 + fname.len + 4;
     while (top_col < SCREEN_COLS) : (top_col += 1) obPut(' ');
-    normalVideo();
+    normalVideo();  // reset BEFORE moving to next row
 
     // ---- Edit area (rows 1..EDIT_ROWS) ----
     var row: usize = 0;
     while (row < EDIT_ROWS) : (row += 1) {
         moveCursor(row + 1, 0);
+        // Erase line with black background (SGR already normal from above).
+        obStr("\x1b[2K");  // erase whole line
+        moveCursor(row + 1, 0);
+
         const line = ed.top_line + row;
         const total = totalLines(&ed.buf);
-        var line_col: usize = 0;
         if (line >= total) {
-            // Past end of file — show tilde.
             obPut('~');
-            line_col = 1;
         } else {
             const ls = lineStart(&ed.buf, line);
-            // Line number prefix.
             obFmt("{d:>4} ", .{line + 1});
-            line_col = 5;
-            // Line content.
             var i = ls;
-            while (i < ed.buf.len() and line_col < SCREEN_COLS) : (i += 1) {
+            var col: usize = 0;
+            const max_col = SCREEN_COLS - 5;
+            while (i < ed.buf.len() and col < max_col) : (i += 1) {
                 const c = ed.buf.get(i);
                 if (c == '\n') break;
                 if (c == '\t') {
-                    const sp = 4 - ((line_col - 5) % 4);
+                    const sp = 4 - (col % 4);
                     var s: usize = 0;
-                    while (s < sp and line_col < SCREEN_COLS) : (s += 1) {
-                        obPut(' '); line_col += 1;
-                    }
+                    while (s < sp and col < max_col) : (s += 1) { obPut(' '); col += 1; }
                 } else {
                     obPut(if (c >= 0x20 and c < 0x7F) c else '?');
-                    line_col += 1;
+                    col += 1;
                 }
             }
         }
-        // Pad rest of line with spaces (no eraseToEol needed after clearScreen).
-        while (line_col < SCREEN_COLS) : (line_col += 1) obPut(' ');
     }
 
     // ---- Bottom status bar (last row) ----
+    normalVideo();  // ensure clean state
     moveCursor(SCREEN_ROWS - 1, 0);
     invertVideo();
     var bot_col: usize = 0;
     if (ed.status_len > 0) {
-        bot_col += obPadStr(ed.status[0..ed.status_len]);
+        obStr(ed.status[0..ed.status_len]);
+        bot_col = ed.status_len;
     } else {
         obFmt(" Ln:{d} Col:{d}  ^S=Save  ^Q=Quit  ^G=GoTo", .{ cur_line + 1, cur_col + 1 });
         bot_col = 40 + numDigits(cur_line + 1) + numDigits(cur_col + 1);
     }
     while (bot_col < SCREEN_COLS) : (bot_col += 1) obPut(' ');
-    normalVideo();
+    normalVideo();  // reset after status bar
 
     // ---- Place physical cursor ----
-    ed.cx = cur_col;
-    ed.cy = cur_line - ed.top_line;
-    moveCursor(ed.cy + 1, @min(ed.cx + 5, SCREEN_COLS - 1));
+    moveCursor(cur_line - ed.top_line + 1, @min(cur_col + 5, SCREEN_COLS - 1));
     obFlush();
-}
-
-// Write a string to output buffer, return number of bytes written.
-fn obPadStr(s: []const u8) usize {
-    obStr(s);
-    return s.len;
 }
 fn numDigits(n: usize) usize {
     if (n == 0) return 1;
