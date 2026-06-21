@@ -4,10 +4,20 @@
 //! against a small, all-Zig libc — not to run prebuilt Linux binaries. It sits
 //! directly on the kernel syscall ABI; no external dependencies.
 
-const SYS_read:  usize = 0;
-const SYS_write: usize = 1;
-const SYS_brk:   usize = 12;
-const SYS_exit:  usize = 60;
+const SYS_read:   usize = 0;
+const SYS_write:  usize = 1;
+const SYS_open:   usize = 2;
+const SYS_close:  usize = 3;
+const SYS_dup:    usize = 32;
+const SYS_dup2:   usize = 33;
+const SYS_getpid: usize = 39;
+const SYS_fork:   usize = 57;
+const SYS_execve: usize = 59;
+const SYS_exit:   usize = 60;
+const SYS_kill:   usize = 62;
+const SYS_brk:    usize = 12;
+const SYS_uptime: usize = 1001;
+const SYS_sleep:  usize = 1002;
 
 inline fn syscall1(n: usize, a1: usize) usize {
     return asm volatile ("syscall"
@@ -889,6 +899,397 @@ export fn scanf(fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return sscanf(@as([*:0]const u8, @ptrCast(&linebuf)), fmt, &ap);
+}
+
+// ============================================================================
+// errno.h
+// ============================================================================
+
+pub var errno: c_int = 0;
+
+const errno_strings = [40][*:0]const u8{
+    "Success",
+    "Operation not permitted",
+    "No such file or directory",
+    "No such process",
+    "Interrupted system call",
+    "I/O error",
+    "No such device or address",
+    "Argument list too long",
+    "Exec format error",
+    "Bad file descriptor",
+    "No child processes",
+    "Try again",
+    "Out of memory",
+    "Permission denied",
+    "Bad address",
+    "Unknown error",
+    "Device or resource busy",
+    "File exists",
+    "Cross-device link",
+    "No such device",
+    "Not a directory",
+    "Is a directory",
+    "Invalid argument",
+    "File table overflow",
+    "Too many open files",
+    "Not a typewriter",
+    "Unknown error",
+    "File too large",
+    "No space left on device",
+    "Illegal seek",
+    "Read-only file system",
+    "Unknown error",
+    "Broken pipe",
+    "Unknown error",
+    "Math result not representable",
+    "Unknown error",
+    "File name too long",
+    "Unknown error",
+    "Function not implemented",
+    "Directory not empty",
+};
+
+export fn strerror(errnum: c_int) callconv(.c) [*:0]const u8 {
+    const i: usize = if (errnum < 0) @intCast(-errnum) else @intCast(errnum);
+    if (i < errno_strings.len) return errno_strings[i];
+    return "Unknown error";
+}
+
+export fn perror(msg: ?[*:0]const u8) callconv(.c) void {
+    if (msg) |m| {
+        const mlen = strlen(m);
+        _ = syscall3(SYS_write, 2, @intFromPtr(m), mlen);
+        _ = syscall3(SYS_write, 2, @intFromPtr(@as([*:0]const u8, ": ")), 2);
+    }
+    const s = strerror(errno);
+    _ = syscall3(SYS_write, 2, @intFromPtr(s), strlen(s));
+    _ = syscall3(SYS_write, 2, @intFromPtr(@as([*:0]const u8, "\n")), 1);
+}
+
+// ============================================================================
+// time.h
+// ============================================================================
+
+const TmC = extern struct {
+    tm_sec: c_int, tm_min: c_int, tm_hour: c_int,
+    tm_mday: c_int, tm_mon: c_int, tm_year: c_int,
+    tm_wday: c_int, tm_yday: c_int, tm_isdst: c_int,
+};
+var g_tm: TmC = std.mem.zeroes(TmC);
+const std = @import("std");
+
+fn secsToTm(secs: usize, out: *TmC) void {
+    var s: usize = secs;
+    out.tm_sec  = @intCast(s % 60); s /= 60;
+    out.tm_min  = @intCast(s % 60); s /= 60;
+    out.tm_hour = @intCast(s % 24); s /= 24;
+    var days: usize = s;
+    out.tm_wday = @intCast((days + 4) % 7);
+    var year: u32 = 1970;
+    while (true) {
+        const leap: usize = if ((year % 4 == 0 and year % 100 != 0) or year % 400 == 0) 1 else 0;
+        if (days < 365 + leap) break;
+        days -= 365 + leap;
+        year += 1;
+    }
+    out.tm_year = @intCast(year - 1900);
+    out.tm_yday = @intCast(days);
+    const leap: usize = if ((year % 4 == 0 and year % 100 != 0) or year % 400 == 0) 1 else 0;
+    const mdays = [12]usize{ 31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) {
+        if (days < mdays[mon]) break;
+        days -= mdays[mon];
+    }
+    out.tm_mon  = @intCast(mon);
+    out.tm_mday = @intCast(days + 1);
+    out.tm_isdst = 0;
+}
+
+export fn time(tloc: ?*c_long) callconv(.c) c_long {
+    const ticks = syscall1(SYS_uptime, 0);
+    const secs: c_long = @intCast(ticks / 100);
+    if (tloc) |p| p.* = secs;
+    return secs;
+}
+
+export fn clock() callconv(.c) c_long {
+    return @intCast(syscall1(SYS_uptime, 0));
+}
+
+export fn gmtime(timer: *const c_long) callconv(.c) *TmC {
+    const s: usize = if (timer.* < 0) 0 else @intCast(timer.*);
+    secsToTm(s, &g_tm);
+    return &g_tm;
+}
+
+export fn localtime(timer: *const c_long) callconv(.c) *TmC {
+    return gmtime(timer);
+}
+
+export fn mktime(tm: *TmC) callconv(.c) c_long {
+    const y: usize = @intCast(tm.tm_year + 1900);
+    var days: usize = (y - 1970) * 365 + (y - 1969) / 4;
+    const moff = [12]usize{ 0,31,59,90,120,151,181,212,243,273,304,334 };
+    days += moff[@intCast(tm.tm_mon)];
+    if (tm.tm_mon >= 2 and (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0))) days += 1;
+    days += @intCast(tm.tm_mday - 1);
+    return @intCast(days * 86400 +
+        @as(usize, @intCast(tm.tm_hour)) * 3600 +
+        @as(usize, @intCast(tm.tm_min))  * 60  +
+        @as(usize, @intCast(tm.tm_sec)));
+}
+
+fn w2(buf: [*]u8, off: usize, n: c_int) void {
+    buf[off]   = '0' + @as(u8, @intCast(@rem(@divTrunc(n, 10), 10)));
+    buf[off+1] = '0' + @as(u8, @intCast(@rem(n, 10)));
+}
+fn w4(buf: [*]u8, off: usize, n: c_int) void {
+    buf[off]   = '0' + @as(u8, @intCast(@rem(@divTrunc(n, 1000), 10)));
+    buf[off+1] = '0' + @as(u8, @intCast(@rem(@divTrunc(n, 100), 10)));
+    buf[off+2] = '0' + @as(u8, @intCast(@rem(@divTrunc(n, 10), 10)));
+    buf[off+3] = '0' + @as(u8, @intCast(@rem(n, 10)));
+}
+
+export fn strftime(buf: [*]u8, maxsz: usize, fmt: [*:0]const u8, tm: *const TmC) callconv(.c) usize {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (fmt[i] != 0 and out + 1 < maxsz) : (i += 1) {
+        if (fmt[i] != '%') { buf[out] = fmt[i]; out += 1; continue; }
+        i += 1;
+        switch (fmt[i]) {
+            'Y' => { if (out + 4 < maxsz) { w4(buf, out, tm.tm_year + 1900); out += 4; } },
+            'y' => { if (out + 2 < maxsz) { w2(buf, out, @rem(tm.tm_year, 100)); out += 2; } },
+            'm' => { if (out + 2 < maxsz) { w2(buf, out, tm.tm_mon + 1); out += 2; } },
+            'd' => { if (out + 2 < maxsz) { w2(buf, out, tm.tm_mday); out += 2; } },
+            'H' => { if (out + 2 < maxsz) { w2(buf, out, tm.tm_hour); out += 2; } },
+            'M' => { if (out + 2 < maxsz) { w2(buf, out, tm.tm_min);  out += 2; } },
+            'S' => { if (out + 2 < maxsz) { w2(buf, out, tm.tm_sec);  out += 2; } },
+            'n' => { buf[out] = '\n'; out += 1; },
+            't' => { buf[out] = '\t'; out += 1; },
+            '%' => { buf[out] = '%';  out += 1; },
+            else => {},
+        }
+    }
+    buf[out] = 0;
+    return out;
+}
+
+// ============================================================================
+// signal.h
+// ============================================================================
+
+const NSIG: usize = 32;
+var sig_handlers: [NSIG]usize = [1]usize{0} ** NSIG;
+
+export fn signal(signum: c_int, handler: usize) callconv(.c) usize {
+    if (signum < 0 or signum >= NSIG) return @bitCast(@as(isize, -1));
+    const idx: usize = @intCast(signum);
+    const old = sig_handlers[idx];
+    sig_handlers[idx] = handler;
+    return old;
+}
+
+export fn kill(pid: c_int, sig: c_int) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]   "{rax}" (SYS_kill),
+          [a1]  "{rdi}" (@as(usize, @bitCast(@as(isize, pid)))),
+          [a2]  "{rsi}" (@as(usize, @bitCast(@as(isize, sig)))),
+        : .{ .rcx = true, .r11 = true, .memory = true })));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+export fn raise(sig: c_int) callconv(.c) c_int {
+    return kill(@intCast(syscall1(SYS_getpid, 0)), sig);
+}
+
+// ============================================================================
+// setjmp.h  jmp_buf = [rbx, rbp, r12, r13, r14, r15, rsp, rip]
+// ============================================================================
+
+export fn setjmp(env: [*]usize) callconv(.c) c_int {
+    asm volatile (
+        \\movq %%rbx,    0(%[e])
+        \\movq %%rbp,    8(%[e])
+        \\movq %%r12,   16(%[e])
+        \\movq %%r13,   24(%[e])
+        \\movq %%r14,   32(%[e])
+        \\movq %%r15,   40(%[e])
+        \\movq %%rsp,   48(%[e])
+        \\movq (%%rsp), %%rax
+        \\movq %%rax,   56(%[e])
+        :
+        : [e] "r" (env),
+        : .{ .rax = true, .memory = true }
+    );
+    return 0;
+}
+
+export fn longjmp(env: [*]usize, val: c_int) callconv(.c) noreturn {
+    const v: usize = if (val == 0) 1 else @intCast(val);
+    asm volatile (
+        \\movq  0(%[e]), %%rbx
+        \\movq  8(%[e]), %%rbp
+        \\movq 16(%[e]), %%r12
+        \\movq 24(%[e]), %%r13
+        \\movq 32(%[e]), %%r14
+        \\movq 40(%[e]), %%r15
+        \\movq 48(%[e]), %%rsp
+        \\movq 56(%[e]), %%rcx
+        \\movq %[v],     %%rax
+        \\jmpq *%%rcx
+        :
+        : [e] "r" (env),
+          [v] "r" (v),
+        : .{ .rbx=true, .rbp=true, .r12=true, .r13=true,
+             .r14=true, .r15=true, .rsp=true, .rcx=true,
+             .rax=true, .memory=true }
+    );
+    unreachable;
+}
+
+// ============================================================================
+// math.h — integer-only fast path
+// ============================================================================
+
+export fn llabs(x: c_longlong) callconv(.c) c_longlong {
+    return if (x < 0) -x else x;
+}
+
+export fn ipow(base: c_longlong, exp: c_uint) callconv(.c) c_longlong {
+    var result: c_longlong = 1;
+    var b = base;
+    var e = exp;
+    while (e > 0) : (e >>= 1) {
+        if (e & 1 != 0) result *%= b;
+        b *%= b;
+    }
+    return result;
+}
+
+export fn isqrt(n: c_ulong) callconv(.c) c_ulong {
+    if (n == 0) return 0;
+    var x: c_ulong = n;
+    var y: c_ulong = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + n / x) / 2; }
+    return x;
+}
+
+export fn gcd(a: c_ulong, b: c_ulong) callconv(.c) c_ulong {
+    var x = a; var y = b;
+    while (y != 0) { const t = y; y = x % y; x = t; }
+    return x;
+}
+
+export fn lcm(a: c_ulong, b: c_ulong) callconv(.c) c_ulong {
+    if (a == 0 or b == 0) return 0;
+    return a / gcd(a, b) *% b;
+}
+
+// ============================================================================
+// unistd.h
+// ============================================================================
+
+var g_null_env: ?[*:0]u8 = null;
+
+export fn read(fd: c_int, buf: [*]u8, count: usize) callconv(.c) isize {
+    const r = @as(isize, @bitCast(syscall3(SYS_read, @intCast(fd), @intFromPtr(buf), count)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return r;
+}
+
+export fn write(fd: c_int, buf: [*]const u8, count: usize) callconv(.c) isize {
+    const r = @as(isize, @bitCast(syscall3(SYS_write, @intCast(fd), @intFromPtr(buf), count)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return r;
+}
+
+export fn close(fd: c_int) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall1(SYS_close, @intCast(fd))));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+export fn dup(oldfd: c_int) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]  "{rax}" (SYS_dup),
+          [a1] "{rdi}" (@as(usize, @intCast(oldfd))),
+        : .{ .rcx = true, .r11 = true, .memory = true })));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return @intCast(r);
+}
+
+export fn dup2(oldfd: c_int, newfd: c_int) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall3(SYS_dup2, @intCast(oldfd), @intCast(newfd), 0)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return @intCast(r);
+}
+
+export fn getpid() callconv(.c) c_int {
+    return @intCast(syscall1(SYS_getpid, 0));
+}
+
+export fn isatty(fd: c_int) callconv(.c) c_int {
+    return if (fd >= 0 and fd <= 2) 1 else 0;
+}
+
+export fn access(path: [*:0]const u8, mode: c_int) callconv(.c) c_int {
+    _ = mode;
+    const fd = @as(isize, @bitCast(syscall3(SYS_open, @intFromPtr(path), 0, 0)));
+    if (fd < 0) { errno = 2; return -1; }
+    _ = syscall1(SYS_close, @intCast(fd));
+    return 0;
+}
+
+export fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]u8 {
+    _ = name;
+    return null;
+}
+
+export fn sleep(seconds: c_uint) callconv(.c) c_uint {
+    _ = syscall1(SYS_sleep, seconds);
+    return 0;
+}
+
+export fn fork() callconv(.c) c_int {
+    const r = @as(isize, @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (SYS_fork),
+        : .{ .rcx = true, .r11 = true, .memory = true })));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return @intCast(r);
+}
+
+export fn execve(path: [*:0]const u8, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) callconv(.c) c_int {
+    _ = envp;
+    const r = @as(isize, @bitCast(syscall3(SYS_execve, @intFromPtr(path), @intFromPtr(argv), 0)));
+    if (r < 0) { errno = @intCast(-r); }
+    return -1;
+}
+
+export fn execv(path: [*:0]const u8, argv: [*]const ?[*:0]const u8) callconv(.c) c_int {
+    return execve(path, argv, @ptrCast(&g_null_env));
+}
+
+export fn _exit(status: c_int) callconv(.c) noreturn {
+    _ = syscall1(SYS_exit, @intCast(status));
+    unreachable;
+}
+
+export fn symlink(_target: [*:0]const u8, _linkpath: [*:0]const u8) callconv(.c) c_int {
+    _ = _target; _ = _linkpath;
+    errno = 38;
+    return -1;
+}
+
+export fn readlink(_path: [*:0]const u8, _buf: [*]u8, _bufsiz: usize) callconv(.c) isize {
+    _ = _path; _ = _buf; _ = _bufsiz;
+    errno = 38;
+    return -1;
 }
 
 // ============================================================================
