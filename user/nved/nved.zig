@@ -289,88 +289,91 @@ fn totalLines(buf: *const Buf) usize {
 // ---- Render ----------------------------------------------------------------
 
 fn render(ed: *Editor) void {
-    hideCursor();
-    moveCursor(0, 0);
-
     const cur_pos = ed.buf.cursor();
     const cur_line = linesBefore(&ed.buf, cur_pos);
     const cur_line_start = lineStart(&ed.buf, cur_line);
     const cur_col = cur_pos - cur_line_start;
 
     // Scroll: ensure cursor line is visible.
-    if (cur_line < ed.top_line)
-        ed.top_line = cur_line;
+    if (cur_line < ed.top_line) ed.top_line = cur_line;
     if (cur_line >= ed.top_line + EDIT_ROWS)
         ed.top_line = cur_line - EDIT_ROWS + 1;
 
-    // ---- Top status bar ----
+    // Hide cursor while drawing to avoid flicker.
+    hideCursor();
+
+    // ---- Top status bar (row 0) ----
+    moveCursor(0, 0);
     invertVideo();
     const fname = ed.filename orelse "[No Name]";
-    const dirty_mark: []const u8 = if (ed.dirty) " [+]" else "    ";
-    obFmt("  nved  {s}{s}", .{ fname, dirty_mark });
-    // Pad to full width
-    const used = 8 + fname.len + 4;
-    var pad: usize = 0;
-    while (pad + used < SCREEN_COLS) : (pad += 1) obPut(' ');
+    const dirty_mark: []const u8 = if (ed.dirty) "[+]" else "   ";
+    obFmt(" nved | {s} {s} ", .{ fname, dirty_mark });
+    var top_used: usize = 9 + fname.len + 4;
+    while (top_used < SCREEN_COLS) : (top_used += 1) obPut(' ');
     normalVideo();
-    obPut('\n');
 
-    // ---- Edit area ----
+    // ---- Edit area (rows 1..EDIT_ROWS) ----
     var row: usize = 0;
     while (row < EDIT_ROWS) : (row += 1) {
         moveCursor(row + 1, 0);
         eraseToEol();
         const line = ed.top_line + row;
         const ls = lineStart(&ed.buf, line);
-        if (ls > ed.buf.len() and line > 0) {
-            // Past end of file — show tilde.
-            obStr("~");
-        } else {
-            // Line number (4 digits + space).
-            obFmt("{d:>4} ", .{ line + 1 });
-            // Content up to SCREEN_COLS - 5 chars.
-            var col: usize = 0;
-            var i = ls;
-            while (i < ed.buf.len() and buf_get(&ed.buf, i) != '\n' and col < SCREEN_COLS - 5) : (i += 1) {
-                const c = buf_get(&ed.buf, i);
-                if (c == '\t') {
-                    const spaces = 4 - (col % 4);
-                    var s: usize = 0;
-                    while (s < spaces and col < SCREEN_COLS - 5) : (s += 1) { obPut(' '); col += 1; }
-                } else {
-                    obPut(if (c >= 0x20 and c < 0x7F) c else '?');
-                    col += 1;
+        // Past end of file: show tilde on empty rows after content.
+        if (ls >= ed.buf.len() and line > 0 and
+            (ed.buf.len() == 0 or ed.buf.get(ed.buf.len() - 1) != '\n'))
+        {
+            // line > total lines: show ~
+            const total = totalLines(&ed.buf);
+            if (line >= total) {
+                obStr("~");
+                continue;
+            }
+        }
+        // Line number (4 cols + space).
+        obFmt("{d:>4} ", .{line + 1});
+        // Line content, clipped to SCREEN_COLS - 5.
+        var col: usize = 0;
+        var i = ls;
+        while (i < ed.buf.len() and col < SCREEN_COLS - 5) : (i += 1) {
+            const c = ed.buf.get(i);
+            if (c == '\n') break;
+            if (c == '\t') {
+                const sp = 4 - (col % 4);
+                var s: usize = 0;
+                while (s < sp and col < SCREEN_COLS - 5) : (s += 1) {
+                    obPut(' '); col += 1;
                 }
+            } else {
+                obPut(if (c >= 0x20 and c < 0x7F) c else '?');
+                col += 1;
             }
         }
     }
 
-    // ---- Bottom status bar ----
+    // ---- Bottom status bar (last row) ----
     moveCursor(SCREEN_ROWS - 1, 0);
     invertVideo();
+    var bot_used: usize = 0;
     if (ed.status_len > 0) {
-        obStr(ed.status[0..ed.status_len]);
-        var p: usize = ed.status_len;
-        while (p < SCREEN_COLS) : (p += 1) obPut(' ');
+        const msg = ed.status[0..ed.status_len];
+        obStr(msg);
+        bot_used = ed.status_len;
     } else {
-        obFmt("  Ln:{d} Col:{d} | ^S save  ^Q quit  ^G goto", .{ cur_line + 1, cur_col + 1 });
-        var p: usize = 0;
-        while (p + 34 + numDigits(cur_line + 1) + numDigits(cur_col + 1) < SCREEN_COLS) : (p += 1) obPut(' ');
+        obFmt(" Ln:{d} Col:{d}  ^S=Save  ^Q=Quit  ^G=GoTo", .{ cur_line + 1, cur_col + 1 });
+        bot_used = 40 + numDigits(cur_line + 1) + numDigits(cur_col + 1);
     }
+    while (bot_used < SCREEN_COLS) : (bot_used += 1) obPut(' ');
     normalVideo();
 
-    // ---- Position physical cursor ----
+    // ---- Place physical cursor ----
     ed.cx = cur_col;
     ed.cy = cur_line - ed.top_line;
-    // Account for line number prefix (5 chars) and clamp.
     const screen_col = @min(ed.cx + 5, SCREEN_COLS - 1);
     moveCursor(ed.cy + 1, screen_col);
     showCursor();
     obFlush();
 }
-
-fn buf_get(buf: *const Buf, i: usize) u8 { return buf.get(i); }
-
 fn numDigits(n: usize) usize {
     if (n == 0) return 1;
     var d: usize = 0;
