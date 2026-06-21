@@ -2255,7 +2255,6 @@ fn appletPing() void {
             nstd.printDec(sent + 1);
             nstd.print("\n");
         }
-        nstd.sleep(1);
     }
     nstd.print("--- ");
     nstd.print(ip_str);

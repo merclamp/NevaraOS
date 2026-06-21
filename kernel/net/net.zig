@@ -12,7 +12,6 @@
 
 const rtl = @import("rtl8139.zig");
 const console = @import("../arch/x86_64/console.zig");
-const heap = @import("../mm/heap.zig");
 const pit = @import("../arch/x86_64/pit.zig");
 
 // ---- Config ----------------------------------------------------------------
@@ -344,10 +343,12 @@ pub fn ping(dst_ip: [4]u8, timeout_ms: u64) PingResult {
 
     rtl.sendFrame(tx_frame[0 .. ETH_HDR + IPV4_HDR + icmp_len]);
 
-    // Wait for echo reply.
-    const deadline = pit.jiffies + timeout_ms / 10; // jiffies at 100 Hz
-    while (pit.jiffies < deadline) {
-        asm volatile ("pause");
+    // Wait for echo reply, polling RX directly (interrupts may be off in syscall).
+    // ~5M iterations ≈ 1-2 s in QEMU.
+    const iters = timeout_ms * 5_000;
+    var wi: usize = 0;
+    while (wi < iters) : (wi += 100) {
+        rtl.pollRx();
         if (ping_reply_received) return .ok;
     }
     return .timeout;
@@ -358,9 +359,12 @@ pub fn ping(dst_ip: [4]u8, timeout_ms: u64) PingResult {
 fn arpResolveWithTimeout(ip: [4]u8, timeout_ms: u64) ?[6]u8 {
     if (arpCacheLookup(ip)) |m| return m;
     sendArpRequest(ip);
-    const deadline = pit.jiffies + timeout_ms / 10;
-    while (pit.jiffies < deadline) {
-        asm volatile ("pause");
+    // Use iteration counter: IRQs may be off inside a syscall, so pit.jiffies
+    // does not tick. ~5M iterations ≈ 1-2 s in QEMU PIO polling loop.
+    const iters = timeout_ms * 5_000;
+    var i: usize = 0;
+    while (i < iters) : (i += 100) {
+        rtl.pollRx();
         if (arpCacheLookup(ip)) |m| return m;
     }
     return null;
