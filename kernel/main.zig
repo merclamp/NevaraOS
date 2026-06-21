@@ -47,9 +47,18 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
     console.writeString("======================================\n");
     console.writeString("[boot] reached 64-bit long mode via GRUB/Multiboot2\n");
     if (have_fb) {
-        console.writeString("[fb] framebuffer console active (1024x768x32)\n");
+        console.writeString("[fb] framebuffer active ");
+        // Print actual resolution GRUB gave us.
+        if (multiboot2.findFramebuffer(info)) |fbinfo| {
+            console.writeDec(fbinfo.width);
+            console.writeString("x");
+            console.writeDec(fbinfo.height);
+            console.writeString("x");
+            console.writeDec(fbinfo.bpp);
+        }
+        console.writeString("\n");
     } else {
-        console.writeString("[fb] no usable framebuffer; serial only\n");
+        console.writeString("[fb] no usable framebuffer (serial only)\n");
     }
 
     if (magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
@@ -79,13 +88,17 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         _ = ata.init();
         pci.init();
         _ = net.init();
-        // Enable IRQ11 (RTL8139 on PCI INTA via slot 3 in QEMU's default routing).
+        // Enable IRQ11 (RTL8139 on PCI INTA).
         pic.unmask(11);
-        // Mount the ext4 rootfs image (ATA primary master) as the VFS root.
-        // The tmpfs layer in vfs.init() already created /dev; ext4 content
-        // is added on top of it.  FAT is no longer used as primary storage.
+
+        // Try to mount ext4 rootfs from any available ATA position.
+        // On real hardware with SATA in IDE compat mode the disk can be on
+        // primary master, primary slave, or secondary master/slave.
+        // ext4.zig uses whichever ATA drive ata.init() found first.
         if (!vfs.mountExt4AsRoot()) {
-            console.writeString("[boot] WARNING: ext4 rootfs not found on ATA master\n");
+            console.writeString("[boot] WARNING: ext4 rootfs not found\n");
+            console.writeString("[boot] Check BIOS: set SATA mode to IDE/Legacy\n");
+            console.writeString("[boot] Continuing without rootfs (shell unavailable)\n");
         }
         users_mod.loadPasswd();
         usermode.init();

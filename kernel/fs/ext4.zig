@@ -20,7 +20,9 @@ const ata = @import("../arch/x86_64/ata.zig");
 const console = @import("../arch/x86_64/console.zig");
 const pit = @import("../arch/x86_64/pit.zig");
 
-const DRIVE: u1 = 0; // primary master
+// Drive is determined at mount time by scanning all ATA positions.
+// 0 = primary master (default for QEMU and most real hardware).
+var active_drive: u1 = 0;
 const SECTOR: u32 = 512;
 const SB_OFFSET: u32 = 1024; // superblock byte offset on disk
 const EXT4_MAGIC: u16 = 0xEF53;
@@ -92,7 +94,7 @@ inline fn irqRestore(flags: u64) void {
 
 
 fn writeSector(lba: u32, buf: *const [SECTOR]u8) bool {
-    return ata.writeSectorOn(DRIVE, lba, buf);
+    return ata.writeSectorOn(active_drive, lba, buf);
 }
 
 /// Read a filesystem block (block_size bytes) into `out`.
@@ -101,7 +103,7 @@ fn readBlock(block: u32, out: []u8) bool {
     var k: u32 = 0;
     while (k < spb) : (k += 1) {
         var sec: [SECTOR]u8 = undefined;
-        if (!ata.readSectorOn(DRIVE, block * spb + k, &sec)) return false;
+        if (!ata.readSectorOn(active_drive, block * spb + k, &sec)) return false;
         @memcpy(out[k * SECTOR ..][0..SECTOR], sec[0..SECTOR]);
     }
     return true;
@@ -183,12 +185,23 @@ fn setSbFreeInodes(v: u32) void { wU32(&sb_cache, 16, v); sb_dirty = true; }
 
 pub fn mount() bool {
     if (mounted) return true;
-    if (!ata.isPresentOn(DRIVE)) return false;
+    // Try primary master (0) then primary slave (1).
+    // On SATA-in-IDE-compat both are scanned.
+    for ([_]u1{ 0, 1 }) |drv| {
+        if (!ata.isPresentOn(drv)) continue;
+        active_drive = drv;
+        if (mountDrive()) return true;
+    }
+    return false;
+}
+
+fn mountDrive() bool {
+    if (!ata.isPresentOn(active_drive)) return false;
 
     var s0: [SECTOR]u8 = undefined;
     var s1: [SECTOR]u8 = undefined;
-    if (!ata.readSectorOn(DRIVE, SB_OFFSET / SECTOR, &s0)) return false;
-    if (!ata.readSectorOn(DRIVE, SB_OFFSET / SECTOR + 1, &s1)) return false;
+    if (!ata.readSectorOn(active_drive, SB_OFFSET / SECTOR, &s0)) return false;
+    if (!ata.readSectorOn(active_drive, SB_OFFSET / SECTOR + 1, &s1)) return false;
     @memcpy(sb_cache[0..SECTOR], s0[0..SECTOR]);
     @memcpy(sb_cache[SECTOR..1024], s1[0..SECTOR]);
 

@@ -21,14 +21,17 @@ mb2_start:
     .long MB2_ARCH
     .long MB2_LEN
     .long MB2_CHECK
-    /* framebuffer request tag: type=5, ask GRUB for 1024x768x32 RGB */
+    /* Framebuffer request tag (type=5).
+     * flags=1 → optional (don't abort if GRUB can't satisfy it).
+     * width=0, height=0, depth=0 → let GRUB pick the best available mode.
+     * The kernel accepts any resolution and 24/32-bpp. */
     .align 8
     .word 5          /* type  */
-    .word 0          /* flags (0 = required) */
+    .word 1          /* flags (1 = optional — boot even without framebuffer) */
     .long 20         /* size  */
-    .long 1024       /* width  */
-    .long 768        /* height */
-    .long 32         /* depth  */
+    .long 0          /* width  (0 = any) */
+    .long 0          /* height (0 = any) */
+    .long 0          /* depth  (0 = any, kernel supports 24 and 32-bpp) */
     /* end tag: type=0, flags=0, size=8 */
     .align 8
     .word 0
