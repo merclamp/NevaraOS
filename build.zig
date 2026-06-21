@@ -221,7 +221,8 @@ pub fn build(b: *std.Build) void {
         \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
         \\           yes basename dirname rm mv sleep chmod \
         \\           find stat strings fold comm printf which xargs ln env dd od nl du \
-        \\           whoami id su useradd userdel passwd; do
+        \\           whoami id su useradd userdel passwd \
+        \\           ping ifconfig; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
         \\printf 'nevara\n'                            > "$ROOTFS/etc/hostname"
@@ -305,6 +306,9 @@ pub fn build(b: *std.Build) void {
         // ext4 rootfs on ATA primary master (drive 0) — the kernel mounts
         // it as the root filesystem via the read-only ext4 driver.
         "-drive",     "file=zig-out/rootfs.ext4,format=raw,if=ide,index=0,media=disk",
+        // User-mode networking with RTL8139 NIC (QEMU default SLIRP, 10.0.2.0/24).
+        "-netdev",    "user,id=net0",
+        "-device",    "rtl8139,netdev=net0",
     });
     run.step.dependOn(&cp_rootfs.step);
     const run_step = b.step("run", "Boot Nevara OS in QEMU");

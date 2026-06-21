@@ -14,6 +14,7 @@ const heap = @import("../mm/heap.zig");
 const usermode = @import("../arch/x86_64/usermode.zig");
 const pit = @import("../arch/x86_64/pit.zig");
 const users = @import("../proc/users.zig");
+const net   = @import("../net/net.zig");
 
 
 // Linux x86_64 syscall numbers (subset).
@@ -49,7 +50,11 @@ const SYS_geteuid: usize = 107;
 const SYS_getegid: usize = 108;
 const SYS_useradd: usize = 1003;
 const SYS_userdel: usize = 1004;
-const SYS_getpwnam: usize = 1005;
+const SYS_getpwnam:  usize = 1005;
+const SYS_net_ping:  usize = 1010; // ping(ip_ptr, timeout_ms) -> 0=ok, -1=timeout
+const SYS_net_send:  usize = 1011; // udpSend(dst_ip_ptr, sport, dport, buf_ptr, len)
+const SYS_net_recv:  usize = 1012; // udpRecv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr)
+const SYS_net_info:  usize = 1013; // write "ip mac" into buf
 
 
 
@@ -391,6 +396,56 @@ fn sysGetcwd(buf_ptr: usize, size: usize) isize {
 }
 
 
+
+// ---- Net syscalls ----------------------------------------------------------
+
+// SYS_net_ping(ip_ptr, timeout_ms) -> 0 ok, -1 timeout, -2 no arp
+fn sysNetPing(ip_ptr: usize, timeout_ms: usize) isize {
+    const ip: *const [4]u8 = @ptrFromInt(ip_ptr);
+    const r = net.ping(ip.*, timeout_ms);
+    return switch (r) {
+        .ok                  => 0,
+        .timeout             => -1,
+        .unreachable_no_arp  => -2,
+    };
+}
+
+// SYS_net_send(dst_ip_ptr, sport, dport, buf_ptr, len)
+fn sysNetSend(ip_ptr: usize, sport: usize, dport: usize, buf_ptr: usize, len: usize) isize {
+    const ip: *const [4]u8 = @ptrFromInt(ip_ptr);
+    const buf: [*]const u8 = @ptrFromInt(buf_ptr);
+    net.udpSend(ip.*, @intCast(sport), @intCast(dport), buf[0..len]);
+    return 0;
+}
+
+// SYS_net_recv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr) -> bytes read or 0
+fn sysNetRecv(buf_ptr: usize, len: usize, src_ip_ptr: usize, sport_ptr: usize, dport_ptr: usize) isize {
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    var src_ip: [4]u8 = .{0} ** 4;
+    var src_port: u16 = 0;
+    var dst_port: u16 = 0;
+    const n = net.udpRecv(buf[0..len], &src_ip, &src_port, &dst_port);
+    if (n > 0 and src_ip_ptr != 0) {
+        const ip_out: *[4]u8 = @ptrFromInt(src_ip_ptr);
+        ip_out.* = src_ip;
+    }
+    if (sport_ptr != 0) @as(*u16, @ptrFromInt(sport_ptr)).* = src_port;
+    if (dport_ptr != 0) @as(*u16, @ptrFromInt(dport_ptr)).* = dst_port;
+    return @intCast(n);
+}
+
+// SYS_net_info(buf_ptr, len) -> 0 ok, -1 no net
+fn sysNetInfo(buf_ptr: usize, len: usize) isize {
+    if (!net.isReady()) return -1;
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    // Write 10.0.2.15 + NUL
+    const info = "10.0.2.15";
+    const n = @min(info.len, len - 1);
+    @memcpy(buf[0..n], info[0..n]);
+    buf[n] = 0;
+    return 0;
+}
+
 /// Central dispatcher, invoked from the SYSCALL handler with a saved trap frame.
 /// Returns the value to place in the caller's rax (exit/execve do not return).
 fn sysUnlink(path_ptr: usize) isize {
@@ -552,6 +607,10 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_useradd  => sysUseradd(a1, a2, a3),
         SYS_userdel  => sysUserdel(a1),
         SYS_getpwnam => sysGetpwnam(a1, a2, a3),
+        SYS_net_ping  => sysNetPing(a1, a2),
+        SYS_net_send  => sysNetSend(a1, a2, a3, tf.r10, tf.r8),
+        SYS_net_recv  => sysNetRecv(a1, a2, a3, tf.r10, tf.r8),
+        SYS_net_info  => sysNetInfo(a1, a2),
         else => -ENOSYS,
     };
 }

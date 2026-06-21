@@ -34,6 +34,10 @@ const SYS_getegid: usize = 108;
 const SYS_useradd: usize = 1003;
 const SYS_userdel: usize = 1004;
 const SYS_getpwnam: usize = 1005;
+const SYS_net_ping: usize = 1010;
+const SYS_net_send: usize = 1011;
+const SYS_net_recv: usize = 1012;
+const SYS_net_info: usize = 1013;
 
 
 
@@ -178,6 +182,46 @@ pub fn userdel(name: [*:0]const u8) isize {
 /// getpwnam(name, buf, len): write "name:x:uid:gid::home:shell\0" into buf. Returns 0 or -errno.
 pub fn getpwnam(name: [*:0]const u8, buf: []u8) isize {
     return @bitCast(syscall3(SYS_getpwnam, @intFromPtr(name), @intFromPtr(buf.ptr), buf.len));
+}
+
+// ---- Network syscall wrappers -----------------------------------------------
+
+/// netPing(ip, timeout_ms): send ICMP echo to ip. Returns 0=ok, -1=timeout, -2=no arp.
+pub fn netPing(ip: [4]u8, timeout_ms: usize) isize {
+    var ip_copy = ip;
+    return @bitCast(syscall3(SYS_net_ping, @intFromPtr(&ip_copy), timeout_ms, 0));
+}
+
+/// netSend(dst_ip, src_port, dst_port, data): send UDP datagram.
+pub fn netSend(dst_ip: [4]u8, src_port: u16, dst_port: u16, data: []const u8) isize {
+    var ip_copy = dst_ip;
+    return @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]  "{rax}" (SYS_net_send),
+          [a1] "{rdi}" (@intFromPtr(&ip_copy)),
+          [a2] "{rsi}" (@as(usize, src_port)),
+          [a3] "{rdx}" (@as(usize, dst_port)),
+          [a4] "{r10}" (@intFromPtr(data.ptr)),
+          [a5] "{r8}"  (data.len),
+        : .{ .rcx = true, .r11 = true, .memory = true }));
+}
+
+/// netRecv(buf, src_ip, src_port, dst_port): receive one UDP datagram. Returns bytes or 0.
+pub fn netRecv(buf: []u8, src_ip: *[4]u8, src_port: *u16, dst_port: *u16) usize {
+    return @truncate(@as(usize, @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]  "{rax}" (SYS_net_recv),
+          [a1] "{rdi}" (@intFromPtr(buf.ptr)),
+          [a2] "{rsi}" (buf.len),
+          [a3] "{rdx}" (@intFromPtr(src_ip)),
+          [a4] "{r10}" (@intFromPtr(src_port)),
+          [a5] "{r8}"  (@intFromPtr(dst_port)),
+        : .{ .rcx = true, .r11 = true, .memory = true }))));
+}
+
+/// netInfo(buf): write IP address string into buf. Returns 0 or -1 (no net).
+pub fn netInfo(buf: []u8) isize {
+    return @bitCast(syscall3(SYS_net_info, @intFromPtr(buf.ptr), buf.len, 0));
 }
 
 /// sleep(): sleep for `seconds` seconds (yields to other processes).

@@ -12,6 +12,8 @@ const heap = @import("mm/heap.zig");
 const sched = @import("proc/sched.zig");
 const process = @import("proc/process.zig");
 const ata = @import("arch/x86_64/ata.zig");
+const pci = @import("arch/x86_64/pci.zig");
+const net = @import("net/net.zig");
 const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
@@ -75,6 +77,10 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         console.writeString("[vfs] root tmpfs + /dev ready\n");
 
         _ = ata.init();
+        pci.init();
+        _ = net.init();
+        // Enable IRQ11 (RTL8139 on PCI INTA via slot 3 in QEMU's default routing).
+        pic.unmask(11);
         // Mount the ext4 rootfs image (ATA primary master) as the VFS root.
         // The tmpfs layer in vfs.init() already created /dev; ext4 content
         // is added on top of it.  FAT is no longer used as primary storage.

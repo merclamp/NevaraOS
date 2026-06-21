@@ -10,6 +10,7 @@ const pic = @import("pic.zig");
 const sched = @import("../../proc/sched.zig");
 const kbd = @import("kbd.zig");
 const pit = @import("pit.zig");
+const rtl8139 = @import("../../net/rtl8139.zig");
 
 
 /// 64-bit IDT gate descriptor (16 bytes).
@@ -132,7 +133,8 @@ export fn isrHandler(frame: *InterruptFrame) callconv(.c) void {
     // Hardware IRQs (remapped PIC: vectors 32..47).
     if (vec >= 32 and vec <= 47) {
         const irq: u8 = @intCast(vec - 32);
-        if (irq == 1) kbd.onIrq(); // keyboard: read scancode before EOI
+        if (irq == 1)  kbd.onIrq();  // keyboard
+        if (irq == 11) rtl8139.onIrq(); // network (RTL8139 on IRQ11)
         pic.sendEOI(irq);
         if (irq == 0) { pit.tick(); sched.preempt(); } // timer: tick + preempt
         return;

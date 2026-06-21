@@ -100,13 +100,16 @@ pub fn main() void {
     else if (eq(cmd, "useradd"))  appletUseradd()
     else if (eq(cmd, "userdel"))  appletUserdel()
     else if (eq(cmd, "passwd"))   appletPasswd()
+    else if (eq(cmd, "ping"))     appletPing()
+    else if (eq(cmd, "ifconfig")) appletIfconfig()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
                     "pwd yes basename dirname rm mv sleep chmod " ++
                     "find stat strings fold comm printf which xargs " ++
                     "ln env dd od nl du " ++
-                    "whoami id su useradd userdel passwd\n");
+                    "whoami id su useradd userdel passwd " ++
+                    "ping ifconfig\n");
 
 }
 
@@ -2181,4 +2184,100 @@ fn appletUserdel() void {
 fn appletPasswd() void {
     nstd.print("passwd: password changing not yet implemented\n");
     nstd.print("       (use useradd to create users with no password)\n");
+}
+
+// ---- ping ------------------------------------------------------------------
+// ping [-c count] [-W timeout_ms] <ip>
+fn appletPing() void {
+    var count: usize = 4;
+    var timeout_ms: usize = 1000;
+    var ip_str: []const u8 = "";
+    var i: usize = 1;
+    while (nstd.arg(i)) |a| : (i += 1) {
+        if (eq(a, "-c")) {
+            i += 1;
+            count = parseNat(nstd.arg(i) orelse "4") orelse 4;
+        } else if (eq(a, "-W")) {
+            i += 1;
+            timeout_ms = parseNat(nstd.arg(i) orelse "1000") orelse 1000;
+        } else {
+            ip_str = a;
+        }
+    }
+
+    if (ip_str.len == 0) {
+        nstd.print("usage: ping [-c count] [-W ms] <ip>\n");
+        return;
+    }
+
+    // Parse dotted-decimal IP.
+    var ip: [4]u8 = .{0} ** 4;
+    var octet: usize = 0;
+    var acc: usize = 0;
+    for (ip_str) |c| {
+        if (c == '.') {
+            if (octet >= 4) { nstd.print("ping: bad IP\n"); return; }
+            ip[octet] = @intCast(acc);
+            octet += 1;
+            acc = 0;
+        } else if (c >= '0' and c <= '9') {
+            acc = acc * 10 + (c - '0');
+        } else {
+            nstd.print("ping: bad IP character\n");
+            return;
+        }
+    }
+    if (octet != 3) { nstd.print("ping: bad IP\n"); return; }
+    ip[3] = @intCast(acc);
+
+    nstd.print("PING ");
+    nstd.print(ip_str);
+    nstd.print(": ");
+    nstd.printDec(count);
+    nstd.print(" packets\n");
+
+    var sent: usize = 0;
+    var recv: usize = 0;
+    while (sent < count) : (sent += 1) {
+        const r = nstd.netPing(ip, timeout_ms);
+        if (r == 0) {
+            nstd.print("reply from ");
+            nstd.print(ip_str);
+            nstd.print(": icmp_seq=");
+            nstd.printDec(sent + 1);
+            nstd.print("\n");
+            recv += 1;
+        } else if (r == -2) {
+            nstd.print("ping: no route to host (ARP timeout)\n");
+            break;
+        } else {
+            nstd.print("Request timeout for icmp_seq=");
+            nstd.printDec(sent + 1);
+            nstd.print("\n");
+        }
+        nstd.sleep(1);
+    }
+    nstd.print("--- ");
+    nstd.print(ip_str);
+    nstd.print(" ping statistics ---\n");
+    nstd.printDec(sent);
+    nstd.print(" transmitted, ");
+    nstd.printDec(recv);
+    nstd.print(" received\n");
+}
+
+// ---- ifconfig --------------------------------------------------------------
+fn appletIfconfig() void {
+    var buf: [64]u8 = undefined;
+    const r = nstd.netInfo(&buf);
+    if (r < 0) {
+        nstd.print("ifconfig: no network interface\n");
+        return;
+    }
+    nstd.print("eth0:\n");
+    nstd.print("  inet ");
+    const ip_str: [*:0]const u8 = @ptrCast(&buf);
+    nstd.print(nstd.span(ip_str));
+    nstd.print("  netmask 255.255.255.0\n");
+    nstd.print("  gateway 10.0.2.2\n");
 }
