@@ -18,13 +18,13 @@ pub const Framebuffer = struct {
     bpp: u8,
 };
 
-const SCALE: usize = 2; // 8x8 font scaled to 16x16 px
-const GLYPH_W: usize = 8 * SCALE; // 16 px
-const GLYPH_H: usize = 8 * SCALE; // 16 px
+const SCALE: usize = 1; // native 8x8 px per glyph
+const GLYPH_W: usize = 8 * SCALE; // 8 px
+const GLYPH_H: usize = 8 * SCALE; // 8 px
 
-// 800x600 at 16x16: 50 cols × 37 rows. Pad slightly for safety.
-const MAX_COLS: usize = 60;
-const MAX_ROWS: usize = 45;
+// 800x600 at 8x8: 100 cols × 75 rows.
+const MAX_COLS: usize = 110;
+const MAX_ROWS: usize = 80;
 
 /// 16-colour ANSI palette (0-7 normal, 8-15 bright). Index 0 is pure black so
 /// the default terminal background is black, not tinted.
