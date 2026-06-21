@@ -47,7 +47,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
     console.writeString("======================================\n");
     console.writeString("[boot] reached 64-bit long mode via GRUB/Multiboot2\n");
     if (have_fb) {
-        console.writeString("[fb] framebuffer console active (1024x768x32)\n");
+        console.writeString("[fb] framebuffer console active (800x600x32)\n");
     } else {
         console.writeString("[fb] no usable framebuffer; serial only\n");
     }
