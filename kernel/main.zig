@@ -91,10 +91,18 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         // Enable IRQ11 (RTL8139 on PCI INTA).
         pic.unmask(11);
 
-        // Try to mount ext4 rootfs from any available ATA position.
-        // On real hardware with SATA in IDE compat mode the disk can be on
-        // primary master, primary slave, or secondary master/slave.
-        // ext4.zig uses whichever ATA drive ata.init() found first.
+        // If GRUB loaded rootfs.ext4 as a Multiboot2 module (Ventoy / live ISO),
+        // register it as a RAM disk. The ext4 driver prefers RAM over ATA.
+        if (multiboot2.findModule(info)) |mod| {
+            console.writeString("[boot] module found @ 0x");
+            console.writeHex(mod.start);
+            console.writeString(" size=");
+            const mod_size = mod.end - mod.start;
+            console.writeDec(mod_size / 1024);
+            console.writeString(" KiB — using as rootfs ramdisk\n");
+            const ext4 = @import("fs/ext4.zig");
+            ext4.setRamdisk(mod.start, mod.end);
+        }
         if (!vfs.mountExt4AsRoot()) {
             console.writeString("[boot] WARNING: ext4 rootfs not found\n");
             console.writeString("[boot] Check BIOS: set SATA mode to IDE/Legacy\n");
