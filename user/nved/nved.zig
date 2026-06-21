@@ -300,80 +300,85 @@ fn render(ed: *Editor) void {
     if (cur_line >= ed.top_line + EDIT_ROWS)
         ed.top_line = cur_line - EDIT_ROWS + 1;
 
-    // Hide cursor while drawing to avoid flicker.
-    hideCursor();
+    // Full clear every frame — eliminates all artifact squares.
+    // fbterm's eraseToEol leaves pixel-level garbage; clearScreen doesn't.
+    obStr("\x1b[2J");
 
     // ---- Top status bar (row 0) ----
     moveCursor(0, 0);
     invertVideo();
     const fname = ed.filename orelse "[No Name]";
     const dirty_mark: []const u8 = if (ed.dirty) "[+]" else "   ";
-    obFmt(" nved | {s} {s} ", .{ fname, dirty_mark });
-    var top_used: usize = 9 + fname.len + 4;
-    while (top_used < SCREEN_COLS) : (top_used += 1) obPut(' ');
+    var top_col: usize = 0;
+    top_col += obPadStr(" nved | ");
+    top_col += obPadStr(fname);
+    top_col += obPadStr(" ");
+    top_col += obPadStr(dirty_mark);
+    top_col += obPadStr(" ");
+    while (top_col < SCREEN_COLS) : (top_col += 1) obPut(' ');
     normalVideo();
 
     // ---- Edit area (rows 1..EDIT_ROWS) ----
     var row: usize = 0;
     while (row < EDIT_ROWS) : (row += 1) {
         moveCursor(row + 1, 0);
-        eraseToEol();
         const line = ed.top_line + row;
-        const ls = lineStart(&ed.buf, line);
-        // Past end of file: show tilde on empty rows after content.
-        if (ls >= ed.buf.len() and line > 0 and
-            (ed.buf.len() == 0 or ed.buf.get(ed.buf.len() - 1) != '\n'))
-        {
-            // line > total lines: show ~
-            const total = totalLines(&ed.buf);
-            if (line >= total) {
-                obStr("~");
-                continue;
-            }
-        }
-        // Line number (4 cols + space).
-        obFmt("{d:>4} ", .{line + 1});
-        // Line content, clipped to SCREEN_COLS - 5.
-        var col: usize = 0;
-        var i = ls;
-        while (i < ed.buf.len() and col < SCREEN_COLS - 5) : (i += 1) {
-            const c = ed.buf.get(i);
-            if (c == '\n') break;
-            if (c == '\t') {
-                const sp = 4 - (col % 4);
-                var s: usize = 0;
-                while (s < sp and col < SCREEN_COLS - 5) : (s += 1) {
-                    obPut(' '); col += 1;
+        const total = totalLines(&ed.buf);
+        var line_col: usize = 0;
+        if (line >= total) {
+            // Past end of file — show tilde.
+            obPut('~');
+            line_col = 1;
+        } else {
+            const ls = lineStart(&ed.buf, line);
+            // Line number prefix.
+            obFmt("{d:>4} ", .{line + 1});
+            line_col = 5;
+            // Line content.
+            var i = ls;
+            while (i < ed.buf.len() and line_col < SCREEN_COLS) : (i += 1) {
+                const c = ed.buf.get(i);
+                if (c == '\n') break;
+                if (c == '\t') {
+                    const sp = 4 - ((line_col - 5) % 4);
+                    var s: usize = 0;
+                    while (s < sp and line_col < SCREEN_COLS) : (s += 1) {
+                        obPut(' '); line_col += 1;
+                    }
+                } else {
+                    obPut(if (c >= 0x20 and c < 0x7F) c else '?');
+                    line_col += 1;
                 }
-            } else {
-                obPut(if (c >= 0x20 and c < 0x7F) c else '?');
-                col += 1;
             }
         }
+        // Pad rest of line with spaces (no eraseToEol needed after clearScreen).
+        while (line_col < SCREEN_COLS) : (line_col += 1) obPut(' ');
     }
 
     // ---- Bottom status bar (last row) ----
     moveCursor(SCREEN_ROWS - 1, 0);
     invertVideo();
-    var bot_used: usize = 0;
+    var bot_col: usize = 0;
     if (ed.status_len > 0) {
-        const msg = ed.status[0..ed.status_len];
-        obStr(msg);
-        bot_used = ed.status_len;
+        bot_col += obPadStr(ed.status[0..ed.status_len]);
     } else {
         obFmt(" Ln:{d} Col:{d}  ^S=Save  ^Q=Quit  ^G=GoTo", .{ cur_line + 1, cur_col + 1 });
-        bot_used = 40 + numDigits(cur_line + 1) + numDigits(cur_col + 1);
+        bot_col = 40 + numDigits(cur_line + 1) + numDigits(cur_col + 1);
     }
-    while (bot_used < SCREEN_COLS) : (bot_used += 1) obPut(' ');
+    while (bot_col < SCREEN_COLS) : (bot_col += 1) obPut(' ');
     normalVideo();
 
     // ---- Place physical cursor ----
     ed.cx = cur_col;
     ed.cy = cur_line - ed.top_line;
-    const screen_col = @min(ed.cx + 5, SCREEN_COLS - 1);
-    moveCursor(ed.cy + 1, screen_col);
-    showCursor();
+    moveCursor(ed.cy + 1, @min(ed.cx + 5, SCREEN_COLS - 1));
     obFlush();
+}
+
+// Write a string to output buffer, return number of bytes written.
+fn obPadStr(s: []const u8) usize {
+    obStr(s);
+    return s.len;
 }
 fn numDigits(n: usize) usize {
     if (n == 0) return 1;
