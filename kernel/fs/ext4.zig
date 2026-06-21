@@ -9,15 +9,16 @@
 //!          dir entries, create files and directories
 //!
 //! Limitations:
-//!   - Extent tree depth 0 only when writing (in-inode, ≤4 extents → ~4 MiB
-//!     per file at 1 KiB block size).  Read supports depth up to 2.
+//!   - Depth-1 extent index supported for writing (covers ~hundreds of MiB).
 //!   - No journal: writes go directly to disk.
 //!   - No metadata checksums.
 //!   - No htree directories (dir_index feature disabled in image).
 
+
 const std = @import("std");
 const ata = @import("../arch/x86_64/ata.zig");
 const console = @import("../arch/x86_64/console.zig");
+const pit = @import("../arch/x86_64/pit.zig");
 
 const DRIVE: u1 = 0; // primary master
 const SECTOR: u32 = 512;
@@ -274,6 +275,14 @@ fn setInoSize(v: u32)   void { wU32(&inobuf, 4, v); }
 fn setInoLinks(v: u16)  void { wU16(&inobuf, 26, v); }
 fn setInoBlocks(v: u32) void { wU32(&inobuf, 28, v); }
 
+/// Current time in seconds since boot (good enough for relative timestamps).
+fn nowSecs() u32 { return @truncate(pit.jiffies / 100); }
+
+fn setInoAtime(v: u32) void { wU32(&inobuf,  8, v); }
+fn setInoMtime(v: u32) void { wU32(&inobuf, 16, v); }
+fn setInoCtime(v: u32) void { wU32(&inobuf, 24, v); }
+fn inoModeFull() u16   { return rU16(&inobuf, 0); }
+
 pub fn isDirMode(mode: u16) bool { return (mode & 0xF000) == 0x4000; }
 
 // ---- extent tree (read) -----------------------------------------------------
@@ -428,48 +437,193 @@ fn freeInodeNum(ino: u32, is_dir: bool) void {
     flushSb();
 }
 
-// ---- extent tree write (depth-0 only) ---------------------------------------
+// ---- extent tree write (depth 0 and 1) --------------------------------------
+//
+// Ext4 extent structure (each entry 12 bytes):
+//   Leaf (ee): ee_block(u32), ee_len(u16), ee_start_hi(u16), ee_start_lo(u32)
+//   Index(ei): ei_block(u32), ei_leaf_lo(u32), ei_leaf_hi(u16), padding(u16)
+// Header (12 bytes): eh_magic, eh_entries, eh_max, eh_depth, eh_generation
+//
+// In-inode i_block: 60 bytes = 12-byte header + 4×12-byte slots (depth=0 max=4).
+// At depth=1 the in-inode holds index entries (ei_block, ei_leaf_lo) pointing
+// to leaf blocks, each of which holds (block_size/12 - 1) leaf extents.
+// With 1 KiB blocks: 85 leaves per block × 32767 blocks per extent ≈ 2.7 GiB.
+// We support up to 3 index entries (i_block slots after the header).
 
-/// Append a new physical block `phys` as the next logical block in the
-/// in-inode flat extent (depth=0).  The inode must already be in `inobuf`.
-/// Returns false if there is no room (max 4 extents in 60-byte i_block area).
-fn extentAppend(phys: u32, logical: u32) bool {
-    const hdr = inobuf[40 .. 40 + 60];
-    // Ensure header is initialised.
-    if (rU16(hdr, 0) != EXT_MAGIC) {
-        // Initialise empty extent header.
-        wU16(@constCast(hdr), 0, EXT_MAGIC);
-        wU16(@constCast(hdr), 2, 0);    // entries
-        wU16(@constCast(hdr), 4, 4);    // max (fits 4 extents in 60 bytes)
-        wU16(@constCast(hdr), 6, 0);    // depth=0
-        wU32(@constCast(hdr), 8, 0);    // generation
-    }
-    const entries = rU16(hdr, 2);
-    const max_ent = rU16(hdr, 4);
-    if (entries >= max_ent) return false; // no space
+// leafAppend: try to append `phys` (logical block `logical`) to a leaf node
+// stored in `leaf_buf`.  Returns true on success.
+fn leafAppend(leaf_buf: []u8, phys: u32, logical: u32) bool {
+    const entries = rU16(leaf_buf, 2);
+    const max_ent = rU16(leaf_buf, 4);
+    if (entries >= max_ent) return false;
 
-    // Check if last extent is contiguous with this block.
+    // Try run-length merge with last extent.
     if (entries > 0) {
-        const last = @constCast(hdr[12 + (@as(usize, entries) - 1) * 12..]);
+        const last = leaf_buf[12 + (@as(usize, entries) - 1) * 12 ..];
         const lb  = rU32(last, 0);
         const len = rU16(last, 4) & 0x7FFF;
         const pb  = rU32(last, 8);
         if (logical == lb + len and phys == pb + len and len < 0x7FFF) {
-            // Extend last extent.
-            wU16(last, 4, len + 1);
-            wU16(@constCast(hdr), 2, entries); // count unchanged
+            wU16(@constCast(last), 4, len + 1);
             return true;
         }
     }
-
-    // Add new extent leaf.
-    const slot = @constCast(hdr[12 + @as(usize, entries) * 12..]);
-    wU32(slot, 0, logical); // ee_block
-    wU16(slot, 4, 1);        // ee_len
-    wU16(slot, 6, 0);        // ee_start_hi (always 0, no 64-bit)
-    wU32(slot, 8, phys);     // ee_start_lo
-    wU16(@constCast(hdr), 2, entries + 1);
+    // New leaf entry.
+    const slot = leaf_buf[12 + @as(usize, entries) * 12 ..];
+    wU32(@constCast(slot), 0, logical);
+    wU16(@constCast(slot), 4, 1);
+    wU16(@constCast(slot), 6, 0);
+    wU32(@constCast(slot), 8, phys);
+    wU16(leaf_buf, 2, entries + 1);
     return true;
+}
+
+// leafMax: how many extent leaves fit in one block.
+fn leafMax() u16 {
+    return @intCast(block_size / 12 - 1);
+}
+
+/// Append a new physical block `phys` (logical `logical`) to the extent tree
+/// in `inobuf`.  Handles depth=0 (in-inode flat) and depth=1 (one index level).
+/// Returns false only on fatal error (no space, I/O failure).
+fn extentAppend(phys: u32, logical: u32) bool {
+    const hdr = inobuf[40 .. 40 + 60];
+
+    // ---- initialise if empty ----
+    if (rU16(hdr, 0) != EXT_MAGIC) {
+        wU16(@constCast(hdr), 0, EXT_MAGIC);
+        wU16(@constCast(hdr), 2, 0);
+        wU16(@constCast(hdr), 4, 4);
+        wU16(@constCast(hdr), 6, 0); // depth=0
+        wU32(@constCast(hdr), 8, 0);
+    }
+
+    const depth = rU16(hdr, 6);
+
+    // ---- depth=0: try fast path ----
+    if (depth == 0) {
+        const entries = rU16(hdr, 2);
+        const max_ent = rU16(hdr, 4);
+        if (entries < max_ent) {
+            // Fast path: still room in in-inode.
+            if (entries > 0) {
+                const last = @constCast(hdr[12 + (@as(usize, entries) - 1) * 12 ..]);
+                const lb  = rU32(last, 0);
+                const len = rU16(last, 4) & 0x7FFF;
+                const pb  = rU32(last, 8);
+                if (logical == lb + len and phys == pb + len and len < 0x7FFF) {
+                    wU16(last, 4, len + 1);
+                    return true;
+                }
+            }
+            const slot = @constCast(hdr[12 + @as(usize, entries) * 12 ..]);
+            wU32(slot, 0, logical);
+            wU16(slot, 4, 1);
+            wU16(slot, 6, 0);
+            wU32(slot, 8, phys);
+            wU16(@constCast(hdr), 2, entries + 1);
+            return true;
+        }
+
+        // In-inode is full at depth=0 — upgrade to depth=1.
+        // 1. Allocate a leaf block and copy the 4 existing extents into it.
+        const leaf0 = allocBlock();
+        if (leaf0 == 0) return false;
+        @memset(extblk[0..block_size], 0);
+        wU16(&extblk, 0, EXT_MAGIC);
+        wU16(&extblk, 2, 4);           // entries = 4
+        wU16(&extblk, 4, leafMax());
+        wU16(&extblk, 6, 0);           // depth=0 (leaf)
+        wU32(&extblk, 8, 0);
+        @memcpy(extblk[12..12 + 4 * 12], hdr[12..12 + 4 * 12]);
+        if (!writeBlock(leaf0, extblk[0..block_size])) { freeBlock(leaf0); return false; }
+
+        // 2. Rewrite in-inode as depth=1 index node with one index entry.
+        wU16(@constCast(hdr), 2, 1);   // entries = 1
+        wU16(@constCast(hdr), 4, 3);   // max = 3 index entries
+        wU16(@constCast(hdr), 6, 1);   // depth = 1
+        // Write index entry 0: ei_block=0, ei_leaf_lo=leaf0.
+        const idx0 = @constCast(hdr[12..]);
+        wU32(idx0, 0, 0);       // ei_block
+        wU32(idx0, 4, leaf0);   // ei_leaf_lo
+        wU16(idx0, 8, 0);       // ei_leaf_hi
+        wU16(idx0, 10, 0);      // padding
+    }
+
+    // ---- depth=1 ----
+    {
+        const entries = rU16(hdr, 2);
+        const max_idx = rU16(hdr, 4);
+
+        // Find the last index entry and try to append to its leaf block.
+        if (entries > 0) {
+            const last_idx = hdr[12 + (@as(usize, entries) - 1) * 12 ..];
+            const leaf_phys = rU32(last_idx, 4); // ei_leaf_lo
+            if (!readBlock(leaf_phys, extblk[0..block_size])) return false;
+            if (leafAppend(extblk[0..block_size], phys, logical)) {
+                return writeBlock(leaf_phys, extblk[0..block_size]);
+            }
+        }
+
+        // Leaf is full — allocate a new leaf block.
+        if (entries >= max_idx) return false; // index also full
+
+        const new_leaf = allocBlock();
+        if (new_leaf == 0) return false;
+        @memset(extblk[0..block_size], 0);
+        wU16(&extblk, 0, EXT_MAGIC);
+        wU16(&extblk, 2, 0);
+        wU16(&extblk, 4, leafMax());
+        wU16(&extblk, 6, 0);
+        wU32(&extblk, 8, 0);
+        if (!leafAppend(extblk[0..block_size], phys, logical)) { freeBlock(new_leaf); return false; }
+        if (!writeBlock(new_leaf, extblk[0..block_size])) { freeBlock(new_leaf); return false; }
+
+        // Add index entry for new leaf.
+        const new_idx = @constCast(hdr[12 + @as(usize, entries) * 12 ..]);
+        wU32(new_idx, 0, logical); // ei_block = first logical block in this leaf
+        wU32(new_idx, 4, new_leaf);
+        wU16(new_idx, 8, 0);
+        wU16(new_idx, 10, 0);
+        wU16(@constCast(hdr), 2, entries + 1);
+        return true;
+    }
+}
+
+/// Free all data blocks belonging to the extent tree currently in `inobuf`.
+/// Handles depth=0 and depth=1; also frees index leaf blocks themselves.
+fn freeExtentTree() void {
+    const hdr = inobuf[40 .. 40 + 60];
+    if (rU16(hdr, 0) != EXT_MAGIC) return;
+    const depth   = rU16(hdr, 6);
+    const entries = rU16(hdr, 2);
+    if (depth == 0) {
+        var i: usize = 0;
+        while (i < entries) : (i += 1) {
+            const e      = hdr[12 + i * 12 ..];
+            const start  = rU32(e, 8);
+            const len    = rU16(e, 4) & 0x7FFF;
+            var k: u32 = 0;
+            while (k < len) : (k += 1) freeBlock(start + k);
+        }
+    } else if (depth == 1) {
+        var i: usize = 0;
+        while (i < entries) : (i += 1) {
+            const idx_e     = hdr[12 + i * 12 ..];
+            const leaf_phys = rU32(idx_e, 4);
+            if (!readBlock(leaf_phys, extblk[0..block_size])) continue;
+            const leaf_ents = rU16(&extblk, 2);
+            var j: usize = 0;
+            while (j < leaf_ents) : (j += 1) {
+                const e     = extblk[12 + j * 12 ..];
+                const start = rU32(e, 8);
+                const len   = rU16(e, 4) & 0x7FFF;
+                var k: u32 = 0;
+                while (k < len) : (k += 1) freeBlock(start + k);
+            }
+            freeBlock(leaf_phys);
+        }
+    }
 }
 
 // ---- file I/O ---------------------------------------------------------------
@@ -498,12 +652,8 @@ pub fn readFile(ino: u32, out: []u8) usize {
 pub fn writeFile(ino: u32, data: []const u8) usize {
     if (!mounted or !readInode(ino)) return 0;
 
-    // Free all existing data blocks then rewrite from scratch (simple strategy).
-    const old_size = inoSize();
-    var lblock: u32 = 0;
-    while (@as(usize, lblock) * block_size < old_size) : (lblock += 1) {
-        if (extentLookup(lblock)) |phys| freeBlock(phys);
-    }
+    // Free all existing data blocks (handles depth 0 and 1).
+    freeExtentTree();
     // Reinitialise i_block extent header.
     @memset(inobuf[40 .. 40 + 60], 0);
 
@@ -521,11 +671,13 @@ pub fn writeFile(ino: u32, data: []const u8) usize {
         done += chunk;
     }
 
-    // Update inode size and block count.
+    // Update inode: size, block count, timestamps.
     setInoSize(@intCast(done));
-    // i_blocks is in 512-byte sectors.
     const n_blks: u32 = (@as(u32, @intCast(done)) + block_size - 1) / block_size;
     setInoBlocks(n_blks * (block_size / 512));
+    const ts = nowSecs();
+    setInoMtime(ts);
+    setInoCtime(ts);
     _ = writeInode(ino);
     return done;
 }
@@ -652,15 +804,18 @@ pub fn removeDirEntry(dir_ino: u32, name: []const u8) u32 {
 
 /// Create a regular file named `name` in directory `dir_ino`.
 /// Returns the new inode number, or 0 on error.
-pub fn createFile(dir_ino: u32, name: []const u8) u32 {
+pub fn createFile(dir_ino: u32, name: []const u8, mode: u16) u32 {
     if (!mounted) return 0;
     const ino = allocInodeNum(false);
     if (ino == 0) return 0;
 
-    // Initialise inode.
+    const ts = nowSecs();
     @memset(inobuf[0..inode_size], 0);
-    wU16(&inobuf, 0, 0x81A4); // mode: regular + 0644
-    wU16(&inobuf, 26, 1);     // nlink=1
+    wU16(&inobuf, 0, 0x8000 | (mode & 0x0FFF)); // file type + mode
+    wU16(&inobuf, 26, 1);  // nlink=1
+    setInoAtime(ts);
+    setInoMtime(ts);
+    setInoCtime(ts);
     // i_block extent header
     wU16(&inobuf, 40, EXT_MAGIC);
     wU16(&inobuf, 42, 0); // entries=0
@@ -672,45 +827,42 @@ pub fn createFile(dir_ino: u32, name: []const u8) u32 {
         freeInodeNum(ino, false);
         return 0;
     }
-
-    // Update dir inode link count (not strictly necessary but correct).
     return ino;
 }
 
 /// Create a directory named `name` in `parent_ino`.
 /// Returns the new inode number, or 0 on error.
-pub fn createDir(parent_ino: u32, name: []const u8) u32 {
+pub fn createDir(parent_ino: u32, name: []const u8, mode: u16) u32 {
     if (!mounted) return 0;
     const ino = allocInodeNum(true);
     if (ino == 0) return 0;
 
-    // Initialise inode.
+    const ts = nowSecs();
     @memset(inobuf[0..inode_size], 0);
-    wU16(&inobuf, 0, 0x41ED); // mode: dir + 0755
-    wU16(&inobuf, 26, 2);     // nlink=2 (. and parent ref)
+    wU16(&inobuf, 0, 0x4000 | (mode & 0x0FFF)); // dir type + mode
+    wU16(&inobuf, 26, 2);  // nlink=2 (. and parent ref)
+    setInoAtime(ts);
+    setInoMtime(ts);
+    setInoCtime(ts);
     wU16(&inobuf, 40, EXT_MAGIC);
     wU16(&inobuf, 42, 0);
     wU16(&inobuf, 44, 4);
     wU16(&inobuf, 46, 0);
     if (!writeInode(ino)) { freeInodeNum(ino, true); return 0; }
 
-    // Add "." and ".." to the new directory.
     if (!createDirEntry(ino, ".", ino, 2)) { freeInodeNum(ino, true); return 0; }
     if (!createDirEntry(ino, "..", parent_ino, 2)) { freeInodeNum(ino, true); return 0; }
 
-    // Add entry in parent.
     if (!createDirEntry(parent_ino, name, ino, 2)) {
         freeInodeNum(ino, true);
         return 0;
     }
 
-    // Bump parent nlink.
     if (readInode(parent_ino)) {
         const nl = inoLinks();
         wU16(&inobuf, 26, nl + 1);
         _ = writeInode(parent_ino);
     }
-
     return ino;
 }
 
@@ -725,21 +877,16 @@ pub fn unlinkFile(dir_ino: u32, name: []const u8) bool {
     const nl = inoLinks();
     if (nl > 1) {
         wU16(&inobuf, 26, nl - 1);
+        setInoCtime(nowSecs());
         _ = writeInode(ino);
         return true;
     }
 
-    // nlink → 0: free data blocks.
-    const fsize = inoSize();
-    var lblock: u32 = 0;
-    while (@as(usize, lblock) * block_size < fsize) : (lblock += 1) {
-        if (extentLookup(lblock)) |phys| freeBlock(phys);
-    }
-    // Zero inode.
+    // nlink → 0: free data blocks (handles depth 0 and 1).
+    const is_dir = (inoModeFull() & 0xF000) == 0x4000;
+    freeExtentTree();
     @memset(inobuf[0..inode_size], 0);
     _ = writeInode(ino);
-
-    const is_dir = (rU16(&inobuf, 0) & 0xF000) == 0x4000;
     freeInodeNum(ino, is_dir);
     return true;
 }
@@ -808,6 +955,26 @@ pub fn entryAt(dir_ino: u32, index: usize) ?Entry {
         pos += block_size;
     }
     return null;
+}
+
+
+/// Change the permission bits of inode `ino`. Updates ctime.
+pub fn chmod(ino: u32, mode: u16) bool {
+    const irq = irqSave();
+    defer irqRestore(irq);
+    if (!mounted or !readInode(ino)) return false;
+    const file_type = inoModeFull() & 0xF000;
+    wU16(&inobuf, 0, file_type | (mode & 0x0FFF));
+    setInoCtime(nowSecs());
+    return writeInode(ino);
+}
+
+/// Return the full mode (type + permission bits) of inode `ino`, or 0 on error.
+pub fn getMode(ino: u32) u16 {
+    const irq = irqSave();
+    defer irqRestore(irq);
+    if (!mounted or !readInode(ino)) return 0;
+    return inoModeFull();
 }
 
 pub fn sizeOf(ino: u32) u32 {

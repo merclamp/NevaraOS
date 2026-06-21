@@ -79,10 +79,11 @@ pub fn main() void {
     else if (eq(cmd, "rm"))       appletRm()
     else if (eq(cmd, "mv"))       appletMv()
     else if (eq(cmd, "sleep"))    appletSleep()
+    else if (eq(cmd, "chmod"))    appletChmod()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
-                    "pwd yes basename dirname rm mv sleep\n");
+                    "pwd yes basename dirname rm mv sleep chmod\n");
 
 }
 
@@ -1154,4 +1155,26 @@ fn appletMv() void {
 fn appletSleep() void {
     const n = parseNat(nstd.arg(1) orelse "0") orelse 0;
     nstd.sleep(n);
+}
+
+
+// ---- chmod -----------------------------------------------------------------
+
+fn appletChmod() void {
+    if (nstd.argc() < 3) { nstd.print("usage: chmod MODE FILE...\n"); return; }
+    const mode_str = nstd.arg(1).?;
+    // Parse octal mode string (e.g. "755", "644").
+    var mode: usize = 0;
+    for (mode_str) |c| {
+        if (c < '0' or c > '7') { nstd.print("chmod: invalid mode\n"); return; }
+        mode = mode * 8 + (c - '0');
+    }
+    var i: usize = 2;
+    while (nstd.argZ(i)) |path| : (i += 1) {
+        if (nstd.chmodFile(path, mode) < 0) {
+            nstd.print("chmod: cannot change ");
+            nstd.print(nstd.arg(i).?);
+            nstd.print("\n");
+        }
+    }
 }

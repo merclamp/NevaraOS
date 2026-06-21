@@ -39,6 +39,7 @@ const SYS_unlink: usize = 87;
 const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
 const SYS_rmdir:  usize = 84;
+const SYS_chmod:  usize = 90;
 
 
 
@@ -412,6 +413,14 @@ fn sysRmdir(path_ptr: usize) isize {
 }
 
 
+fn sysChmod(path_ptr: usize, mode: usize) isize {
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    vfs.chmod(path, @intCast(mode & 0xFFF)) catch |e| return errnoFor(e);
+    return 0;
+}
+
+
 pub fn handle(tf: *usermode.TrapFrame) isize {
     const num = tf.rax;
     const a1 = tf.rdi;
@@ -446,6 +455,7 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_rename => sysRename(a1, a2),
         SYS_sleep  => sysSleep(a1),
         SYS_rmdir  => sysRmdir(a1),
+        SYS_chmod  => sysChmod(a1, a2),
         else => -ENOSYS,
     };
 }

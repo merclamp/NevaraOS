@@ -24,6 +24,8 @@ const SYS_unlink: usize = 87;
 const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
 const SYS_rmdir:  usize = 84;
+const SYS_chmod:  usize = 90;
+
 
 
 
@@ -128,6 +130,10 @@ pub fn renameFile(old: [*:0]const u8, new: [*:0]const u8) isize {
     return @bitCast(syscall3(SYS_rename, @intFromPtr(old), @intFromPtr(new), 0));
 }
 
+/// chmod(): change file permissions. Returns 0 on success, negative errno.
+pub fn chmodFile(path: [*:0]const u8, mode: usize) isize {
+    return @bitCast(syscall3(SYS_chmod, @intFromPtr(path), mode, 0));
+}
 /// sleep(): sleep for `seconds` seconds (yields to other processes).
 pub fn sleep(seconds: usize) void {
     _ = syscall1(SYS_sleep, seconds);

@@ -212,11 +212,11 @@ pub fn create(path: []const u8, kind: Kind) Error!*Node {
     if (parent.on_ext and parent.ext_ino != 0) {
         switch (kind) {
             .file => {
-                const ino = ext4.createFile(parent.ext_ino, parts.name);
+                const ino = ext4.createFile(parent.ext_ino, parts.name, 0o644);
                 if (ino != 0) { node.on_ext = true; node.ext_ino = ino; }
             },
             .dir => {
-                const ino = ext4.createDir(parent.ext_ino, parts.name);
+                const ino = ext4.createDir(parent.ext_ino, parts.name, 0o755);
                 if (ino != 0) { node.on_ext = true; node.ext_ino = ino; }
             },
             else => {},
@@ -397,6 +397,23 @@ pub fn init() Error!void {
     _ = try mkdev("/dev/null",    &null_ops);
     _ = try mkdev("/dev/zero",    &zero_ops);
     _ = try mkdev("/dev/console", &console_ops);
+}
+
+
+/// Change permission bits of the ext4-backed node at `path`.
+pub fn chmod(path: []const u8, mode: u16) Error!void {
+    const node = try resolve(path);
+    if (node.on_ext and node.ext_ino != 0) {
+        if (!ext4.chmod(node.ext_ino, mode)) return Error.NotSupported;
+    }
+    // Pure tmpfs nodes don't have persistent mode bits; silently succeed.
+}
+
+/// Return the full mode word (file type + permission bits) of a node,
+/// read from the on-disk inode.  Returns 0 for tmpfs-only nodes.
+pub fn getMode(node: *const Node) u16 {
+    if (node.on_ext and node.ext_ino != 0) return ext4.getMode(node.ext_ino);
+    return 0;
 }
 
 pub fn mkpipe() Error![2]*Node {
