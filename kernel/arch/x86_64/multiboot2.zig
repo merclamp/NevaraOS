@@ -11,6 +11,8 @@ const fb = @import("fb.zig");
 const TAG_END: u32 = 0;
 const TAG_MMAP: u32 = 6;
 const TAG_FRAMEBUFFER: u32 = 8;
+const TAG_MODULE: u32 = 3;
+
 
 /// Common header at the start of every tag.
 const TagHeader = extern struct {
@@ -137,6 +139,33 @@ pub fn findFramebuffer(info_addr: usize) ?fb.Framebuffer {
                     .bpp = t.bpp,
                 };
             }
+        }
+        offset += alignUp8(tag.size);
+    }
+    return null;
+}
+/// Multiboot2 module tag (type 3).
+const ModuleTag = extern struct {
+    type: u32,
+    size: u32,
+    mod_start: u32,
+    mod_end:   u32,
+    // null-terminated cmdline string follows
+};
+
+/// A loaded module (e.g. rootfs.ext4 passed via module2 in grub.cfg).
+pub const Module = struct { start: u32, end: u32 };
+
+/// Find the first Multiboot2 module tag; returns null if none was loaded.
+pub fn findModule(info_addr: usize) ?Module {
+    const total_size: u32 = @as(*const u32, @ptrFromInt(info_addr)).*;
+    var offset: usize = 8;
+    while (offset < total_size) {
+        const tag: *const TagHeader = @ptrFromInt(info_addr + offset);
+        if (tag.type == TAG_END) break;
+        if (tag.type == TAG_MODULE) {
+            const m: *const ModuleTag = @ptrFromInt(info_addr + offset);
+            return .{ .start = m.mod_start, .end = m.mod_end };
         }
         offset += alignUp8(tag.size);
     }

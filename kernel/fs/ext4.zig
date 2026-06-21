@@ -44,7 +44,11 @@ inline fn wU32(b: []u8, o: usize, v: u32) void {
     std.mem.writeInt(u32, b[o..][0..4], v, .little);
 }
 
-// ---- on-disk state ----------------------------------------------------------
+// ---- on-disk / in-RAM state --------------------------------------------------
+
+/// When non-zero, reads come from a RAM image instead of ATA (module2 path).
+var ramdisk_base: usize = 0;
+var ramdisk_size: usize = 0;
 
 var mounted = false;
 var block_size: u32 = 0;
@@ -97,6 +101,13 @@ fn writeSector(lba: u32, buf: *const [SECTOR]u8) bool {
 
 /// Read a filesystem block (block_size bytes) into `out`.
 fn readBlock(block: u32, out: []u8) bool {
+    if (ramdisk_base != 0) {
+        const byte_off: usize = @as(usize, block) * block_size;
+        if (byte_off + block_size > ramdisk_size) return false;
+        @memcpy(out[0..block_size],
+            @as([*]const u8, @ptrFromInt(ramdisk_base + byte_off))[0..block_size]);
+        return true;
+    }
     const spb = block_size / SECTOR;
     var k: u32 = 0;
     while (k < spb) : (k += 1) {
@@ -106,6 +117,7 @@ fn readBlock(block: u32, out: []u8) bool {
     }
     return true;
 }
+
 
 /// Write a filesystem block (block_size bytes) from `data`.
 fn writeBlock(block: u32, data: []const u8) bool {
@@ -181,8 +193,16 @@ fn setSbFreeInodes(v: u32) void { wU32(&sb_cache, 16, v); sb_dirty = true; }
 
 // ---- mount ------------------------------------------------------------------
 
+/// Register the rootfs image from a Multiboot2 module (module2 in grub.cfg).
+/// Must be called before mount().
+pub fn setRamdisk(start: usize, end: usize) void {
+    ramdisk_base = start;
+    ramdisk_size = end - start;
+}
+
 pub fn mount() bool {
     if (mounted) return true;
+    if (ramdisk_base != 0) return mountRam();
     if (!ata.isPresentOn(DRIVE)) return false;
 
     var s0: [SECTOR]u8 = undefined;
@@ -231,6 +251,52 @@ pub fn mount() bool {
 
     mounted = true;
     console.writeString("[ext4] mounted read-write\n");
+    return true;
+}
+
+fn mountRam() bool {
+    if (ramdisk_size < SB_OFFSET + 1024) return false;
+    const ram: [*]const u8 = @ptrFromInt(ramdisk_base);
+    @memcpy(sb_cache[0..1024], ram[SB_OFFSET .. SB_OFFSET + 1024]);
+
+    if (rU16(&sb_cache, 56) != EXT4_MAGIC) return false;
+
+    const log_bs = rU32(&sb_cache, 24);
+    block_size = @as(u32, 1024) << @intCast(log_bs);
+    if (block_size > MAX_BLOCK_SIZE) return false;
+
+    inodes_per_group = rU32(&sb_cache, 40);
+    inode_size       = rU16(&sb_cache, 88);
+    if (inode_size == 0) inode_size = 128;
+    if (inode_size > 256) inode_size = 256;
+
+    first_data_block = rU32(&sb_cache, 20);
+    blocks_per_group = rU32(&sb_cache, 32);
+    total_blocks     = rU32(&sb_cache, 4);
+    total_inodes     = rU32(&sb_cache, 0);
+
+    const incompat = rU32(&sb_cache, 96);
+    desc_size = if (incompat & 0x80 != 0) rU16(&sb_cache, 254) else 32;
+    if (desc_size == 0) desc_size = 32;
+    if (desc_size > 64) desc_size = 64;
+
+    num_groups = (total_blocks + blocks_per_group - 1) / blocks_per_group;
+    if (num_groups > MAX_GROUPS) num_groups = MAX_GROUPS;
+
+    const gdt_block = first_data_block + 1;
+    const gdt_bytes = num_groups * desc_size;
+    var byte_off: u32 = 0;
+    while (byte_off < gdt_bytes) {
+        const blk_idx = gdt_block + byte_off / block_size;
+        if (!readBlock(blk_idx, blk[0..block_size])) return false;
+        const blk_off = byte_off % block_size;
+        const copy = @min(block_size - blk_off, gdt_bytes - byte_off);
+        @memcpy(gdt_cache[byte_off .. byte_off + copy], blk[blk_off .. blk_off + copy]);
+        byte_off += copy;
+    }
+
+    mounted = true;
+    console.writeString("[ext4] mounted from ramdisk (module2)\n");
     return true;
 }
 

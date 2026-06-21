@@ -81,11 +81,19 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         _ = net.init();
         // Enable IRQ11 (RTL8139 on PCI INTA via slot 3 in QEMU's default routing).
         pic.unmask(11);
-        // Mount the ext4 rootfs image (ATA primary master) as the VFS root.
-        // The tmpfs layer in vfs.init() already created /dev; ext4 content
-        // is added on top of it.  FAT is no longer used as primary storage.
+        // If GRUB loaded rootfs.ext4 as a Multiboot2 module (module2 in grub.cfg),
+        // register it as a RAM disk. The ext4 driver prefers RAM over ATA.
+        if (multiboot2.findModule(info)) |mod| {
+            console.writeString("[boot] module found @ 0x");
+            console.writeHex(mod.start);
+            console.writeString(" size=");
+            console.writeDec((mod.end - mod.start) / 1024);
+            console.writeString(" KiB — using as rootfs ramdisk\n");
+            const ext4 = @import("fs/ext4.zig");
+            ext4.setRamdisk(mod.start, mod.end);
+        }
         if (!vfs.mountExt4AsRoot()) {
-            console.writeString("[boot] WARNING: ext4 rootfs not found on ATA master\n");
+            console.writeString("[boot] WARNING: ext4 rootfs not found\n");
         }
         users_mod.loadPasswd();
         usermode.init();

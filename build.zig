@@ -285,15 +285,10 @@ pub fn build(b: *std.Build) void {
     const install_kernel_bin = b.addInstallBinFile(kernel_elf, "kernel");
     b.getInstallStep().dependOn(&install_kernel_bin.step);
 
-    // ---- Run in QEMU ----------------------------------------------------
-    // Extract the rootfs from the ISO into zig-out/ for the -drive argument.
-    // We copy it from the build cache so QEMU always sees a fresh image.
-    const cp_rootfs = b.addSystemCommand(&.{ "sh", "-c",
-        "mkdir -p zig-out && cp \"$1\" zig-out/rootfs.ext4", "--",
-    });
-    cp_rootfs.addFileArg(rootfs_img);
-    cp_rootfs.step.dependOn(&mkrootfs.step);
-
+    // ---- Run in QEMU --------------------------------------------------------
+    // rootfs.ext4 is embedded in the ISO at /boot/rootfs.ext4 and loaded by
+    // GRUB as a Multiboot2 module (module2 line in grub.cfg). No separate ATA
+    // drive image is needed — the kernel reads rootfs from RAM via setRamdisk().
     const run = b.addSystemCommand(&.{"qemu-system-x86_64"});
     run.addArg("-cdrom");
     run.addFileArg(iso_file);
@@ -303,14 +298,11 @@ pub fn build(b: *std.Build) void {
         "-m",         "512M",
         "-vga",       "std",
         "-boot",      "d",
-        // ext4 rootfs on ATA primary master (drive 0) — the kernel mounts
-        // it as the root filesystem via the read-only ext4 driver.
-        "-drive",     "file=zig-out/rootfs.ext4,format=raw,if=ide,index=0,media=disk",
         // User-mode networking with RTL8139 NIC (QEMU default SLIRP, 10.0.2.0/24).
         "-netdev",    "user,id=net0",
         "-device",    "rtl8139,netdev=net0",
     });
-    run.step.dependOn(&cp_rootfs.step);
+    run.step.dependOn(&install_iso.step);
     const run_step = b.step("run", "Boot Nevara OS in QEMU");
     run_step.dependOn(&run.step);
 }
