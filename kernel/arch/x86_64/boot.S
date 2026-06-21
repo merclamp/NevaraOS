@@ -59,56 +59,62 @@ stack_top:
 .global _start
 .type _start, @function
 _start:
-    /* ---- Diagnostic: write 'N' to VGA cell 0 in 32-bit mode.
-     * If this appears, GRUB handed us control successfully.
-     * Yellow-on-black (attr=0x0E) so it's unmissable. */
-    movl  $0x0E4E, %eax       /* 'N' with yellow attr */
-    movl  $0xB8000, %ecx
-    movw  %ax, (%ecx)
-
-    /* GRUB: eax = multiboot2 magic, ebx = info struct address.
-     * Stash them in edi/esi so they survive into the 64-bit ABI. */
+    /* Save GRUB registers FIRST — before any eax clobber.
+     * eax = 0x36d76289 (Multiboot2 magic), ebx = info struct ptr.
+     * edi/esi survive the page-table loops; in 64-bit mode 32-bit
+     * writes zero-extend into rdi/rsi (SysV AMD64 ABI). */
     movl %eax, %edi
     movl %ebx, %esi
 
+    /* Diagnostic 'N' at VGA cell 0 — AFTER saving magic. */
+    movl  $0x0E4E, %eax
+    movl  $0xB8000, %ecx
+    movw  %ax, (%ecx)
+
     movl $stack_top, %esp
 
-    /* p4[0] -> p3 (present | writable) */
+    /* p4[0] -> p3 (present | writable). Use register-indirect to
+     * avoid 64-bit displacement emitted for direct symbol refs. */
     movl $p3_table, %eax
     orl  $0x3, %eax
-    movl %eax, p4_table
+    movl $p4_table, %ecx
+    movl %eax, (%ecx)
 
-    /* p3[0..3] -> the four PD tables (present | writable) */
+    /* p3[0..3] -> the four PD tables */
     xorl %ecx, %ecx
 .fill_p3:
     movl %ecx, %edx
-    shll $12, %edx                 /* edx = ecx * 4096 */
+    shll $12, %edx
     movl $p2_tables, %eax
     addl %edx, %eax
     orl  $0x3, %eax
-    movl %eax, p3_table(, %ecx, 8)
+    movl $p3_table, %edx
+    leal (%edx, %ecx, 8), %edx
+    movl %eax, (%edx)
+    movl $0, 4(%edx)
     incl %ecx
     cmpl $4, %ecx
     jne  .fill_p3
 
-    /* Fill 2048 entries of 2 MiB huge pages -> identity map 0..4 GiB.
-     * entry = (i * 2 MiB) | present | writable | huge.
-     * 4 GiB covers high MMIO/framebuffer regions (e.g. ~0xFD000000). */
+    /* 2048 x 2 MiB huge pages -> identity map 0..4 GiB */
     xorl %ecx, %ecx
 .fill_p2:
     movl $0x200000, %eax
-    mul  %ecx                      /* edx:eax = 0x200000 * ecx (fits in eax) */
-    orl  $0x83, %eax               /* present | writable | huge (PS) */
-    movl %eax, p2_tables(, %ecx, 8) /* low dword; high dword stays 0 */
+    mull %ecx
+    orl  $0x83, %eax
+    movl $p2_tables, %edx
+    leal (%edx, %ecx, 8), %edx
+    movl %eax, (%edx)
+    movl $0, 4(%edx)
     incl %ecx
     cmpl $2048, %ecx
     jne  .fill_p2
 
-    /* CR3 = p4 */
+    /* CR3 = p4_table */
     movl $p4_table, %eax
     movl %eax, %cr3
 
-    /* Diagnostic: 'A' at VGA cell 1 = CR3 set, entering paging setup */
+    /* Diagnostic 'A' at VGA cell 1 */
     movl  $0x0E41, %eax
     movl  $0xB8002, %ecx
     movw  %ax, (%ecx)
@@ -118,23 +124,23 @@ _start:
     orl  $(1 << 5), %eax
     movl %eax, %cr4
 
-    /* EFER.LME = 1 (MSR 0xC0000080, bit 8) */
+    /* EFER.LME = 1 */
     movl $0xC0000080, %ecx
     rdmsr
     orl  $(1 << 8), %eax
     wrmsr
 
-    /* CR0.PG = 1 (paging on -> enter compatibility mode) */
+    /* CR0.PG = 1 */
     movl %cr0, %eax
     orl  $(1 << 31), %eax
     movl %eax, %cr0
 
-    /* Diagnostic: 'R' at VGA cell 2 = paging on, about to ljmp */
+    /* Diagnostic 'R' at VGA cell 2 */
     movl  $0x0E52, %eax
     movl  $0xB8004, %ecx
     movw  %ax, (%ecx)
 
-    /* Load 64-bit GDT and far-jump to flush into true 64-bit mode */
+    /* Load 64-bit GDT and far-jump to true 64-bit mode */
     lgdt gdt64_pointer
     ljmp $0x08, $long_mode_start
 
