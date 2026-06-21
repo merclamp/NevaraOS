@@ -136,23 +136,149 @@ Twelve foundational stages are done and verified in QEMU:
 
 ## Roadmap
 
-What still needs to be built (roughly in order):
+### Phase I — Foundation ✅ Complete
 
-- ✅ **ext4 write hardening** — large files (depth-1 extent index nodes for
-  files beyond ~4 MiB), inode timestamps (atime/mtime/ctime from PIT jiffies),
-  and file-permission bits with `chmod` (syscall 90, NevBox applet).
-- ✅ **Richer ZLibc** — `ctype.h` (12 functions), `string.h` (20 functions),
-  `stdlib.h` (13 functions), `stdio.h` with full `printf`/`sprintf`/`snprintf`/
-  `sscanf`/`scanf`, `calloc`/`realloc`, `strtol`/`strtoul`, `strtok`, and more.
-- ✅ **More NevBox applets** — `find`, `stat`, `strings`, `fold`, `comm`,
-  `printf`, `which`, `xargs`, `ln`, `env`, `dd`, `od`, `nl`, `du` (15 new
-  applets; total now 50+ with user-management applets).
-- ✅ **Users & permissions** — kernel uid/gid credentials, user DB, `/home`,
-  `useradd`/`userdel`/`su`/`whoami`/`id` NevBox applets, POSIX credential
-  syscalls, coloured `user@nevara` prompt in **nsh**.
-- ⏳ **Networking end-to-end test** — verify `ping 10.0.2.2` replies,
-  ARP handshake, and UDP round-trip from inside the running OS.
-- ⏳ **Polish** — package manager, TCP, and more.
+Everything below has been built and verified in QEMU:
+
+| Area | What was done |
+|---|---|
+| Boot & memory | GRUB/Multiboot2 → 64-bit, PMM (bitmap), VMM (4-level paging), heap (first-fit) |
+| Processes | fork/execve/wait4/exit, preemptive round-robin scheduler (100 Hz PIT) |
+| Syscalls | 35+ Linux-compatible syscall numbers, full errno, toAbsPath resolver |
+| Filesystem | ext4 read-write (depth-0/1 extents, timestamps, chmod), VFS tmpfs layer |
+| Userspace | nstd + ZLibc (ctype/string/stdlib/stdio), ZInit PID 1, nsh shell |
+| Shell | Pipelines, I/O redirect, background jobs, shell variables, history |
+| NevBox | 50+ applets (echo cat ls wc grep find dd ping ifconfig whoami …) |
+| Users | uid/gid/euid/egid per-process, user DB → /etc/passwd, useradd/userdel/su |
+| Networking | PCI scan, RTL8139 + DMA fix, ARP/IPv4/ICMP/UDP, ping, ifconfig |
+| TTY | Canonical + raw mode (SYS_tty_mode=1020), ANSI/VT100 terminal |
+
+---
+
+### Phase II — Stabilisation & System Services
+
+Phase II picks up immediately where Phase I left off. The priority order is:
+unfinished items from Phase I first, then system hardening, then richer
+services, with the desktop as the final milestone.
+
+#### II-A · Finish Phase I loose ends
+
+- ⏳ **Networking end-to-end test** — verify `ping 10.0.2.2` gets an ICMP
+  reply from QEMU SLIRP; confirm ARP cache is populated; UDP round-trip echo.
+  Fix any remaining issues in `pollRx` / RX ring wrap-around / ISR routing.
+- ⏳ **TCP stack** — implement TCP (SYN/ACK state machine, retransmit timer,
+  sliding window); expose `connect`/`accept`/`send`/`recv` as BSD-socket-style
+  syscalls (`SYS_socket=41`, `SYS_connect=42`, `SYS_accept=43`, etc.).
+- ⏳ **nved text editor** — finish the nano-style editor started in Phase I:
+  raw TTY mode is ready (`SYS_tty_mode=1020`); implement the gap-buffer,
+  VT100 rendering, and key bindings (Ctrl-S save, Ctrl-Q quit, arrow nav,
+  PgUp/PgDn, cut/paste line, search); wire into rootfs as `/bin/nved`.
+
+#### II-B · ZLibc — complete POSIX coverage
+
+ZLibc currently covers ctype / string / stdlib / stdio.  The next layer:
+
+- ⏳ **`time.h`** — `time()`, `clock()`, `difftime()`, `gmtime()`/`localtime()`
+  (backed by `pit.jiffies`; no RTC yet, boot epoch = 0).
+- ⏳ **`errno.h` + thread-local errno** — a per-process `errno` cell written by
+  every failing syscall wrapper; `perror()`, `strerror()`.
+- ⏳ **`signal.h` (POSIX subset)** — `signal()`, `kill()`, `raise()`,
+  `SIGINT`/`SIGTERM`/`SIGKILL`/`SIGSEGV`; kernel signal delivery on syscall
+  return (no real-time signals in this phase).
+- ⏳ **`setjmp.h`** — `setjmp`/`longjmp` in Zig inline asm.
+- ⏳ **`math.h` (integer-only fast path)** — `abs`, `labs`, `llabs`, `pow`
+  (integer exponent), `sqrt` (Newton–Raphson); float functions remain stubs
+  until compiler-rt is available.
+- ⏳ **`unistd.h` additions** — `getenv` (reads synthetic env block), `access`,
+  `dup`, `isatty`, `symlink`, `readlink`.
+
+#### II-C · ZInit — real PID 1
+
+ZInit currently just exec-loops nsh.  A proper init system needs:
+
+- ⏳ **Service table** — a static array of service descriptors (name, path,
+  args, restart policy, dependencies); read from `/etc/init.d/` or a simple
+  `/etc/zinit.conf` (key=value, no XML/YAML).
+- ⏳ **Supervision loop** — spawn all services in dependency order; `wait4`
+  in a tight loop; restart crashed services with exponential back-off.
+- ⏳ **Runlevels / targets** — `single` (maintenance shell only), `multi`
+  (full services), `reboot` / `poweroff` (QEMU ACPI shutdown via port 0x604).
+- ⏳ **`zinit-ctl` applet** — `status`, `start <svc>`, `stop <svc>`,
+  `restart <svc>`, `list`; communicates with ZInit via a simple pipe or
+  shared memory flag.
+- ⏳ **Syslog** — write kernel/service messages to `/var/log/syslog`
+  (ring-buffer backed, rotated at 1 MiB).
+
+#### II-D · Kernel hardening
+
+- ⏳ **Signals kernel-side** — `SYS_kill=62`, `SYS_signal=48`, pending-signal
+  bitmask per-process; deliver on syscall return path.
+- ⏳ **`/proc` virtual filesystem** — read-only entries: `/proc/self/pid`,
+  `/proc/self/maps`, `/proc/meminfo`, `/proc/uptime`, `/proc/version`,
+  `/proc/<pid>/status` for each live process.
+- ⏳ **`/sys` stubs** — minimal `/sys/block/sda`, `/sys/class/net/eth0`
+  (for tools that probe hardware via sysfs).
+- ⏳ **File-permission enforcement** — extend the kernel uid/gid model to
+  per-node owner uid/gid + mode bits; `open()` enforces DAC (owner/group/other
+  rwx); `SYS_chown=92`, `SYS_fchmod=91`.
+- ⏳ **Demand paging / CoW fork** — copy-on-write page fault handler; `fork()`
+  no longer deep-copies all pages; only modified pages are duplicated.
+- ⏳ **mmap stub** — `SYS_mmap=9` for anonymous mappings (needed by musl and
+  many programs); backed by VMM page allocation.
+
+#### II-E · Network server stack
+
+With TCP in place, build the first services:
+
+- ⏳ **DHCP client** — send DHCPDISCOVER / handle DHCPOFFER / send DHCPREQUEST
+  on boot; configure IP, netmask, GW, DNS dynamically (QEMU SLIRP responds).
+- ⏳ **DNS resolver** — simple iterative resolver; cache up to 64 RRs; expose
+  as `getaddrinfo()` stub in ZLibc.
+- ⏳ **HTTP client (`httpget`)** — NevBox applet: `httpget <url>` → TCP connect
+  → raw HTTP/1.0 GET → print body; no TLS in this phase.
+- ⏳ **Minimal HTTP server (`httpd`)** — serve static files from `/var/www/html`
+  over TCP port 80; single-threaded (fork per request); useful for demos.
+- ⏳ **SSH-lite** — a tiny custom remote shell protocol over TCP (not full SSH);
+  authenticate with the user DB; run a shell on the connection.
+
+#### II-F · Package manager (`npkg`)
+
+- ⏳ **Package format** — a `.npkg` tar.gz with a `MANIFEST` (name, version,
+  files, deps); built from the same `build.zig` pipeline.
+- ⏳ **`npkg install / remove / list / update`** — NevBox applet or standalone
+  binary; downloads packages via `httpget`, verifies SHA256, extracts to `/`.
+- ⏳ **Package index** — a static `packages.idx` file served by the HTTP server;
+  no dynamic registry in this phase.
+
+#### II-G · Developer tools
+
+- ⏳ **`nved` text editor** — (see II-A; listed here for completeness).
+- ⏳ **`nasm`-lite assembler** — a tiny x86_64 assembler for educational use;
+  subset of NASM syntax; outputs flat binaries or ELF objects.
+- ⏳ **`nld` linker** — minimal ELF static linker sufficient to link
+  nstd-based programs from object files.
+- ⏳ **`ncc` Zig compiler front-end** — thin wrapper around `zig cc` that sets
+  the correct freestanding target and linker script.
+
+#### II-H · Desktop environment (final milestone)
+
+After the server stack is stable and tested, bring up a graphical environment:
+
+- ⏳ **Framebuffer compositor** — a minimal window manager that blits rectangular
+  windows onto the 1024×768 framebuffer; double-buffered to avoid tearing.
+- ⏳ **PS/2 mouse driver** — extend `kbd.zig` to handle IRQ12 (PS/2 auxiliary
+  port); decode X/Y delta + buttons; route to the compositor.
+- ⏳ **Window protocol** — a simple message queue (shared-memory ring or pipe)
+  between apps and the compositor: `WM_CREATE_WINDOW`, `WM_DRAW_RECT`,
+  `WM_KEY_EVENT`, `WM_MOUSE_EVENT`.
+- ⏳ **Terminal emulator** — a graphical window that embeds nsh; renders text
+  with the existing 8×8 bitmap font; supports ANSI/VT100 codes.
+- ⏳ **File manager** — a two-pane file browser (à la Midnight Commander) drawn
+  in the framebuffer; uses `getdents64` for directory listing.
+- ⏳ **Application launcher** — a status bar with a clock (from `pit.jiffies`),
+  network indicator, and a button that opens an app list.
+
+---
 
 This is a marathon, not a sprint. Progress happens phase by phase.
 
