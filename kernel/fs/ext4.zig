@@ -20,9 +20,7 @@ const ata = @import("../arch/x86_64/ata.zig");
 const console = @import("../arch/x86_64/console.zig");
 const pit = @import("../arch/x86_64/pit.zig");
 
-// Drive is determined at mount time by scanning all ATA positions.
-// 0 = primary master (default for QEMU and most real hardware).
-var active_drive: u1 = 0;
+const DRIVE: u1 = 0; // primary master
 const SECTOR: u32 = 512;
 const SB_OFFSET: u32 = 1024; // superblock byte offset on disk
 const EXT4_MAGIC: u16 = 0xEF53;
@@ -46,13 +44,7 @@ inline fn wU32(b: []u8, o: usize, v: u32) void {
     std.mem.writeInt(u32, b[o..][0..4], v, .little);
 }
 
-// ---- on-disk / in-RAM state --------------------------------------------------
-
-/// When non-zero, I/O reads from a RAM image instead of ATA.
-/// This is used when GRUB passes rootfs.ext4 as a Multiboot2 module
-/// (e.g. when booted via Ventoy or from a live ISO without a second drive).
-var ramdisk_base: usize = 0;
-var ramdisk_size: usize = 0;
+// ---- on-disk state ----------------------------------------------------------
 
 var mounted = false;
 var block_size: u32 = 0;
@@ -100,25 +92,16 @@ inline fn irqRestore(flags: u64) void {
 
 
 fn writeSector(lba: u32, buf: *const [SECTOR]u8) bool {
-    return ata.writeSectorOn(active_drive, lba, buf);
+    return ata.writeSectorOn(DRIVE, lba, buf);
 }
 
 /// Read a filesystem block (block_size bytes) into `out`.
 fn readBlock(block: u32, out: []u8) bool {
-    if (ramdisk_base != 0) {
-        // RAM-backed: direct memory copy (Ventoy / live ISO path).
-        const byte_off: usize = @as(usize, block) * block_size;
-        if (byte_off + block_size > ramdisk_size) return false;
-        @memcpy(out[0..block_size],
-            @as([*]const u8, @ptrFromInt(ramdisk_base + byte_off))[0..block_size]);
-        return true;
-    }
-    // ATA path.
     const spb = block_size / SECTOR;
     var k: u32 = 0;
     while (k < spb) : (k += 1) {
         var sec: [SECTOR]u8 = undefined;
-        if (!ata.readSectorOn(active_drive, block * spb + k, &sec)) return false;
+        if (!ata.readSectorOn(DRIVE, block * spb + k, &sec)) return false;
         @memcpy(out[k * SECTOR ..][0..SECTOR], sec[0..SECTOR]);
     }
     return true;
@@ -200,31 +183,12 @@ fn setSbFreeInodes(v: u32) void { wU32(&sb_cache, 16, v); sb_dirty = true; }
 
 pub fn mount() bool {
     if (mounted) return true;
-    // If a ramdisk was registered (Ventoy / module2 path), try it first.
-    if (ramdisk_base != 0 and mountRam()) return true;
-    // Otherwise scan ATA: primary master (0) then primary slave (1).
-    for ([_]u1{ 0, 1 }) |drv| {
-        if (!ata.isPresentOn(drv)) continue;
-        active_drive = drv;
-        if (mountDrive()) return true;
-    }
-    return false;
-}
-
-/// Register the rootfs image from a Multiboot2 module (Ventoy path).
-/// Must be called before mount().
-pub fn setRamdisk(start: usize, end: usize) void {
-    ramdisk_base = start;
-    ramdisk_size = end - start;
-}
-
-fn mountDrive() bool {
-    if (!ata.isPresentOn(active_drive)) return false;
+    if (!ata.isPresentOn(DRIVE)) return false;
 
     var s0: [SECTOR]u8 = undefined;
     var s1: [SECTOR]u8 = undefined;
-    if (!ata.readSectorOn(active_drive, SB_OFFSET / SECTOR, &s0)) return false;
-    if (!ata.readSectorOn(active_drive, SB_OFFSET / SECTOR + 1, &s1)) return false;
+    if (!ata.readSectorOn(DRIVE, SB_OFFSET / SECTOR, &s0)) return false;
+    if (!ata.readSectorOn(DRIVE, SB_OFFSET / SECTOR + 1, &s1)) return false;
     @memcpy(sb_cache[0..SECTOR], s0[0..SECTOR]);
     @memcpy(sb_cache[SECTOR..1024], s1[0..SECTOR]);
 
@@ -267,55 +231,6 @@ fn mountDrive() bool {
 
     mounted = true;
     console.writeString("[ext4] mounted read-write\n");
-    return true;
-}
-
-
-fn mountRam() bool {
-    // Read superblock directly from the in-RAM image.
-    if (ramdisk_size < SB_OFFSET + 1024) return false;
-    const ram: [*]const u8 = @ptrFromInt(ramdisk_base);
-    @memcpy(sb_cache[0..1024], ram[SB_OFFSET .. SB_OFFSET + 1024]);
-
-    if (rU16(&sb_cache, 56) != EXT4_MAGIC) return false;
-
-    const log_bs = rU32(&sb_cache, 24);
-    block_size = @as(u32, 1024) << @intCast(log_bs);
-    if (block_size > MAX_BLOCK_SIZE) return false;
-
-    inodes_per_group = rU32(&sb_cache, 40);
-    inode_size       = rU16(&sb_cache, 88);
-    if (inode_size == 0) inode_size = 128;
-    if (inode_size > 256) inode_size = 256;
-
-    first_data_block = rU32(&sb_cache, 20);
-    blocks_per_group = rU32(&sb_cache, 32);
-    total_blocks     = rU32(&sb_cache, 4);
-    total_inodes     = rU32(&sb_cache, 0);
-
-    const incompat = rU32(&sb_cache, 96);
-    desc_size = if (incompat & 0x80 != 0) rU16(&sb_cache, 254) else 32;
-    if (desc_size == 0) desc_size = 32;
-    if (desc_size > 64) desc_size = 64;
-
-    num_groups = (total_blocks + blocks_per_group - 1) / blocks_per_group;
-    if (num_groups > MAX_GROUPS) num_groups = MAX_GROUPS;
-
-    // Load GDT into cache via readBlock (which already handles ramdisk_base).
-    const gdt_block = first_data_block + 1;
-    const gdt_bytes = num_groups * desc_size;
-    var byte_off: u32 = 0;
-    while (byte_off < gdt_bytes) {
-        const blk_idx = gdt_block + byte_off / block_size;
-        if (!readBlock(blk_idx, blk[0..block_size])) return false;
-        const blk_off = byte_off % block_size;
-        const copy = @min(block_size - blk_off, gdt_bytes - byte_off);
-        @memcpy(gdt_cache[byte_off .. byte_off + copy], blk[blk_off .. blk_off + copy]);
-        byte_off += copy;
-    }
-
-    mounted = true;
-    console.writeString("[ext4] mounted from RAM (Ventoy/module2)\n");
     return true;
 }
 

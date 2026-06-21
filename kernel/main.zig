@@ -47,18 +47,9 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
     console.writeString("======================================\n");
     console.writeString("[boot] reached 64-bit long mode via GRUB/Multiboot2\n");
     if (have_fb) {
-        console.writeString("[fb] framebuffer active ");
-        // Print actual resolution GRUB gave us.
-        if (multiboot2.findFramebuffer(info)) |fbinfo| {
-            console.writeDec(fbinfo.width);
-            console.writeString("x");
-            console.writeDec(fbinfo.height);
-            console.writeString("x");
-            console.writeDec(fbinfo.bpp);
-        }
-        console.writeString("\n");
+        console.writeString("[fb] framebuffer console active (1024x768x32)\n");
     } else {
-        console.writeString("[fb] no usable framebuffer (serial only)\n");
+        console.writeString("[fb] no usable framebuffer; serial only\n");
     }
 
     if (magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
@@ -88,25 +79,13 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         _ = ata.init();
         pci.init();
         _ = net.init();
-        // Enable IRQ11 (RTL8139 on PCI INTA).
+        // Enable IRQ11 (RTL8139 on PCI INTA via slot 3 in QEMU's default routing).
         pic.unmask(11);
-
-        // If GRUB loaded rootfs.ext4 as a Multiboot2 module (Ventoy / live ISO),
-        // register it as a RAM disk. The ext4 driver prefers RAM over ATA.
-        if (multiboot2.findModule(info)) |mod| {
-            console.writeString("[boot] module found @ 0x");
-            console.writeHex(mod.start);
-            console.writeString(" size=");
-            const mod_size = mod.end - mod.start;
-            console.writeDec(mod_size / 1024);
-            console.writeString(" KiB — using as rootfs ramdisk\n");
-            const ext4 = @import("fs/ext4.zig");
-            ext4.setRamdisk(mod.start, mod.end);
-        }
+        // Mount the ext4 rootfs image (ATA primary master) as the VFS root.
+        // The tmpfs layer in vfs.init() already created /dev; ext4 content
+        // is added on top of it.  FAT is no longer used as primary storage.
         if (!vfs.mountExt4AsRoot()) {
-            console.writeString("[boot] WARNING: ext4 rootfs not found\n");
-            console.writeString("[boot] Check BIOS: set SATA mode to IDE/Legacy\n");
-            console.writeString("[boot] Continuing without rootfs (shell unavailable)\n");
+            console.writeString("[boot] WARNING: ext4 rootfs not found on ATA master\n");
         }
         users_mod.loadPasswd();
         usermode.init();

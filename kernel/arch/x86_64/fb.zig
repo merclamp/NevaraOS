@@ -1,8 +1,11 @@
 //! Linear-framebuffer terminal emulator.
 //!
-//! Supports 32-bpp and 24-bpp RGB linear framebuffers provided by GRUB.
-//! Works with any resolution GRUB negotiates (1024x768, 1280x800, etc.).
-//! Falls back to serial-only if no usable framebuffer is available.
+//! Renders the public-domain 8x8 font (scaled) into a GRUB-provided 32-bpp RGB
+//! linear framebuffer and behaves like a small ANSI/VT100 terminal: a cell grid
+//! with per-cell colour, a block cursor, and a CSI escape-sequence parser
+//! (cursor movement, line/screen erase, and SGR colours). Only 32-bpp
+//! framebuffers are supported (we request depth 32 in the Multiboot2 header);
+//! other depths disable graphical output.
 
 const font = @import("../../font.zig");
 
@@ -82,7 +85,7 @@ var have_param: bool = false;
 /// Initialize the console. Returns false (and stays inactive) for unsupported
 /// framebuffer formats or geometry that overflows the static cell grid.
 pub fn init(fb: Framebuffer) bool {
-    if (fb.bpp != 32 and fb.bpp != 24) return false;
+    if (fb.bpp != 32) return false;
     const c = fb.width / GLYPH_W;
     const r = fb.height / GLYPH_H;
     if (c == 0 or r == 0 or c > MAX_COLS or r > MAX_ROWS) return false;
@@ -108,17 +111,8 @@ pub fn isActive() bool {
     return active;
 }
 
-/// Write one pixel at (x,y). Handles 32-bpp (4 bytes/pixel) and 24-bpp (3 bytes/pixel).
-inline fn writePixel(x: usize, y: usize, color: u32) void {
-    const base = info.addr + y * info.pitch + x * (info.bpp / 8);
-    if (info.bpp == 32) {
-        @as(*volatile u32, @ptrFromInt(base)).* = color;
-    } else {
-        const p: [*]volatile u8 = @ptrFromInt(base);
-        p[0] = @truncate(color);
-        p[1] = @truncate(color >> 8);
-        p[2] = @truncate(color >> 16);
-    }
+inline fn pixelPtr(x: usize, y: usize) *volatile u32 {
+    return @ptrFromInt(info.addr + y * info.pitch + x * 4);
 }
 
 inline fn cellAt(x: usize, y: usize) *Cell {
@@ -139,7 +133,7 @@ fn drawGlyph(ch: u8, ox: usize, oy: usize, fg: u32, bg: u32) void {
             while (sy < SCALE) : (sy += 1) {
                 var sx: usize = 0;
                 while (sx < SCALE) : (sx += 1) {
-                    writePixel(ox + gx * SCALE + sx, oy + gy * SCALE + sy, color);
+                    pixelPtr(ox + gx * SCALE + sx, oy + gy * SCALE + sy).* = color;
                 }
             }
         }
@@ -171,25 +165,28 @@ fn clearScreen() void {
     while (y < info.height) : (y += 1) {
         var x: usize = 0;
         while (x < info.width) : (x += 1) {
-            writePixel(x, y, palette[cur_bg]);
+            pixelPtr(x, y).* = palette[cur_bg];
         }
     }
 }
 
 fn scroll() void {
-    // Blit pixel rows up by one glyph height using byte-level copy
-    // (works for both 24-bpp and 32-bpp without stride assumptions).
+    // Blit the visible pixels up by one glyph row (fast path), then clear the
+    // freed bottom row.
     const row_bytes = info.pitch * GLYPH_H;
-    const total: usize = info.pitch * info.height;
-    const moved: usize = total - row_bytes;
+    const total = info.pitch * info.height;
+    const moved = total - row_bytes;
 
-    const fb_bytes: [*]volatile u8 = @ptrFromInt(info.addr);
     var i: usize = 0;
-    while (i < moved) : (i += 1) fb_bytes[i] = fb_bytes[i + row_bytes];
-    // Clear the freed bottom rows.
-    while (i < total) : (i += 1) fb_bytes[i] = 0;
+    while (i < moved) : (i += 4) {
+        const src: *volatile u32 = @ptrFromInt(info.addr + row_bytes + i);
+        @as(*volatile u32, @ptrFromInt(info.addr + i)).* = src.*;
+    }
+    while (i < total) : (i += 4) {
+        @as(*volatile u32, @ptrFromInt(info.addr + i)).* = palette[DEFAULT_BG];
+    }
 
-    // Shift cell grid up one row, clear the last row.
+    // Shift the cell grid up one row and clear the last row.
     var y: usize = 1;
     while (y < rows) : (y += 1) {
         var x: usize = 0;
@@ -197,6 +194,7 @@ fn scroll() void {
     }
     var x: usize = 0;
     while (x < cols) : (x += 1) cellAt(x, rows - 1).* = .{};
+
     cy = rows - 1;
 }
 

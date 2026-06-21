@@ -9,24 +9,8 @@ const console = @import("console.zig");
 const fb = @import("fb.zig");
 
 const TAG_END: u32 = 0;
-const TAG_MODULE: u32 = 3;
 const TAG_MMAP: u32 = 6;
 const TAG_FRAMEBUFFER: u32 = 8;
-
-/// Multiboot2 module tag (type 3).
-const ModuleTag = extern struct {
-    type: u32,
-    size: u32,
-    mod_start: u32, // physical address of module start
-    mod_end:   u32, // physical address of module end (exclusive)
-    // null-terminated command string follows
-};
-
-/// A loaded module (e.g. rootfs.ext4).
-pub const Module = struct {
-    start: u32,
-    end:   u32,
-};
 
 /// Common header at the start of every tag.
 const TagHeader = extern struct {
@@ -205,21 +189,4 @@ fn printMmap(tag: *const MmapTag) void {
     console.writeString("[mb2] total available RAM: ");
     console.writeDec(total_available / (1024 * 1024));
     console.writeString(" MiB\n");
-}
-
-/// Find the first Multiboot2 module tag and return its physical address range.
-/// Returns null if no module was provided by the bootloader (ATA path used).
-pub fn findModule(info_addr: usize) ?Module {
-    const total_size: u32 = @as(*const u32, @ptrFromInt(info_addr)).*;
-    var offset: usize = 8;
-    while (offset < total_size) {
-        const tag: *const TagHeader = @ptrFromInt(info_addr + offset);
-        if (tag.type == TAG_END) break;
-        if (tag.type == TAG_MODULE) {
-            const m: *const ModuleTag = @ptrFromInt(info_addr + offset);
-            return .{ .start = m.mod_start, .end = m.mod_end };
-        }
-        offset += alignUp8(tag.size);
-    }
-    return null;
 }

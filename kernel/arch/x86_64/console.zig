@@ -1,17 +1,14 @@
-//! Kernel console: fans output to serial, VGA text mode, and the
-//! Multiboot2 framebuffer (when available).
-//!
-//! VGA text mode (0xB8000, 80x25) is always enabled — it works on any
-//! x86 hardware regardless of framebuffer availability.
+//! Kernel console: fans output out to the serial port and, once a framebuffer
+//! is available, to the on-screen framebuffer text console. All kernel
+//! subsystems log through here so output appears both on the wire and on the
+//! monitor.
 
 const serial = @import("serial.zig");
-const vga    = @import("vga.zig");
-const fb     = @import("fb.zig");
+const fb = @import("fb.zig");
 
-/// Initialize serial and VGA text sinks. Both are always available.
+/// Initialize the always-available serial sink.
 pub fn init() void {
     serial.init();
-    vga.init();
 }
 
 /// Enable on-screen output via a bootloader-provided framebuffer.
@@ -42,10 +39,8 @@ fn rawByte(c: u8) void {
     if (c == '\n') {
         serial.writeByte('\r');
         serial.writeByte('\n');
-        vga.putChar('\n');
     } else {
         serial.writeByte(c);
-        vga.putChar(c);
     }
     fb.putChar(c);
 }
