@@ -289,6 +289,7 @@ fn putChar_(ch: u8) void {
 
 fn newline() void {
     pending_wrap = false;
+    cx = 0;  // LF implies CR in our terminal (matches console.zig behaviour)
     if (cy == scroll_bottom) {
         scrollUp(1);
     } else {
