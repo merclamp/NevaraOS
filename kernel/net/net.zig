@@ -1,4 +1,4 @@
-//! Nevara network stack — Ethernet / ARP / IPv4 / ICMP / UDP.
+//! Nevara network stack — Ethernet / ARP / IPv4 / ICMP / UDP / TCP.
 //!
 //! Configuration (QEMU user-mode networking defaults):
 //!   Our IP:  10.0.2.15
@@ -6,13 +6,12 @@
 //!   Netmask: 255.255.255.0
 //!   DNS:     10.0.2.3
 //!
-//! Implemented: ARP request/reply, ICMP echo reply, UDP send.
-//! Not implemented: TCP, DHCP, IP fragmentation, routing (only same-subnet
-//! and default-gateway send via gateway MAC).
+//! Implemented: ARP, ICMP echo, UDP, TCP (passive+active open, data, close).
 
-const rtl = @import("rtl8139.zig");
+const rtl     = @import("rtl8139.zig");
+const tcp_mod = @import("tcp.zig");
 const console = @import("../arch/x86_64/console.zig");
-const pit = @import("../arch/x86_64/pit.zig");
+const pit     = @import("../arch/x86_64/pit.zig");
 
 // ---- Config ----------------------------------------------------------------
 
@@ -158,7 +157,9 @@ fn handleArp(data: []const u8) void {
 
 const IPV4_HDR: usize = 20;
 const PROTO_ICMP: u8 = 1;
+const PROTO_TCP:  u8 = 6;
 const PROTO_UDP:  u8 = 17;
+
 
 fn ipChecksum(buf: []const u8) u16 {
     var sum: u32 = 0;
@@ -415,17 +416,105 @@ fn handleIPv4(data: []const u8) void {
 
     switch (proto) {
         PROTO_ICMP => {
-            // Check if this is a reply to our ping.
             const base = ETH_HDR + IPV4_HDR;
             if (data.len >= base + ICMP_HDR and data[base] == ICMP_ECHO_REPLY) {
                 ping_reply_received = true;
             }
             handleIcmp(src_ip, src_mac, data);
         },
-        PROTO_UDP => handleUdp(src_ip, data),
+        PROTO_UDP  => handleUdp(src_ip, data),
+        PROTO_TCP  => tcp_mod.handleSegment(src_ip, src_mac, data),
         else => {},
     }
 }
+
+
+// ---- TCP frame builder (called by tcp.zig) ----------------------------------
+// TCP header: [sport 2][dport 2][seq 4][ack 4][off+flags 2][window 2][csum 2][urg 2]
+
+const TCP_HDR: usize = 20;
+var last_tcp_frame_len: usize = 0;
+
+pub fn buildTcpFrame(
+    dst_mac:   [6]u8,
+    dst_ip:    [4]u8,
+    src_port:  u16,
+    dst_port:  u16,
+    seq:       u32,
+    ack:       u32,
+    flags:     u8,
+    window:    u16,
+    payload:   []const u8,
+    _dst_ip2:  [4]u8, // unused, kept for symmetry
+) void {
+    _ = _dst_ip2;
+    const payload_len = payload.len;
+    const tcp_total   = TCP_HDR + payload_len;
+
+    _ = buildEthHdr(dst_mac, ETH_IPV4, IPV4_HDR + tcp_total);
+    buildIpHdr(dst_ip, PROTO_TCP, tcp_total);
+
+    const t = ETH_HDR + IPV4_HDR;
+    writeU16be(&tx_frame, t,      src_port);
+    writeU16be(&tx_frame, t + 2,  dst_port);
+    writeU32be(&tx_frame, t + 4,  seq);
+    writeU32be(&tx_frame, t + 8,  ack);
+    tx_frame[t + 12] = (TCP_HDR / 4) << 4; // data offset
+    tx_frame[t + 13] = flags;
+    writeU16be(&tx_frame, t + 14, window);
+    writeU16be(&tx_frame, t + 16, 0); // checksum placeholder
+    writeU16be(&tx_frame, t + 18, 0); // urgent pointer
+
+    if (payload_len > 0) {
+        @memcpy(tx_frame[t + TCP_HDR .. t + TCP_HDR + payload_len], payload);
+    }
+
+    // Compute TCP checksum over pseudo-header + TCP segment.
+    const csum = tcpPseudoChecksum(MY_IP, dst_ip, tx_frame[t .. t + tcp_total]);
+    writeU16be(&tx_frame, t + 16, csum);
+
+    last_tcp_frame_len = ETH_HDR + IPV4_HDR + tcp_total;
+}
+
+pub fn sendTcpFrame(_payload_len: usize) void {
+    _ = _payload_len;
+    if (last_tcp_frame_len > 0)
+        rtl.sendFrame(tx_frame[0..last_tcp_frame_len]);
+}
+
+pub fn retransmitFrame(frame: []const u8) void {
+    rtl.sendFrame(frame);
+}
+
+pub fn lastTcpFrameLen() usize { return last_tcp_frame_len; }
+
+pub fn resolveMacPub(dst_ip: [4]u8) ?[6]u8 { return resolveMac(dst_ip); }
+
+pub fn copyLastFrame(buf: []u8) usize {
+    const n = @min(last_tcp_frame_len, buf.len);
+    @memcpy(buf[0..n], tx_frame[0..n]);
+    return n;
+}
+
+fn tcpPseudoChecksum(src_ip: [4]u8, dst_ip: [4]u8, seg: []const u8) u16 {
+    var sum: u32 = 0;
+    sum += (@as(u32, src_ip[0]) << 8) | src_ip[1];
+    sum += (@as(u32, src_ip[2]) << 8) | src_ip[3];
+    sum += (@as(u32, dst_ip[0]) << 8) | dst_ip[1];
+    sum += (@as(u32, dst_ip[2]) << 8) | dst_ip[3];
+    sum += PROTO_TCP;
+    sum += @as(u32, @intCast(seg.len));
+    var i: usize = 0;
+    while (i + 1 < seg.len) : (i += 2) {
+        sum += (@as(u32, seg[i]) << 8) | seg[i + 1];
+    }
+    if (i < seg.len) sum += @as(u32, seg[i]) << 8;
+    while (sum >> 16 != 0) sum = (sum & 0xFFFF) + (sum >> 16);
+    return ~@as(u16, @truncate(sum));
+}
+
+// ---- Re-export tcp_mod for syscall layer ------------------------------------
+pub const tcp = tcp_mod;
 
 // ---- Public init -----------------------------------------------------------
 

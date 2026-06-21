@@ -112,6 +112,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         // user processes and halt whenever nothing else is runnable.
         while (true) {
             sched.yield();
+            net.tcp.tick();
             asm volatile ("hlt");
         }
     } else {

@@ -37,8 +37,18 @@ const SYS_getpwnam: usize = 1005;
 const SYS_net_ping: usize = 1010;
 const SYS_net_send: usize = 1011;
 const SYS_net_recv: usize = 1012;
-const SYS_net_info: usize = 1013;
-const SYS_tty_mode: usize = 1020;
+const SYS_net_info:  usize = 1013;
+// TCP syscalls
+const SYS_tcp_open:    usize = 1014;
+const SYS_tcp_connect: usize = 1015;
+const SYS_tcp_listen:  usize = 1016;
+const SYS_tcp_accept:  usize = 1017;
+const SYS_tcp_send:    usize = 1018;
+const SYS_tcp_recv:    usize = 1019;
+const SYS_tcp_close:   usize = 1021;
+const SYS_tcp_status:  usize = 1022;
+const SYS_tty_mode:    usize = 1020;
+
 
 
 
@@ -227,6 +237,57 @@ pub fn netInfo(buf: []u8) isize {
 
 /// ttyMode(1) switches stdin to raw (byte-by-byte, no echo); 0 restores canonical.
 pub fn ttyMode(mode: usize) void { _ = syscall1(SYS_tty_mode, mode); }
+
+// ---- TCP socket wrappers ----------------------------------------------------
+
+/// Open a new TCP socket. Returns socket index (0..15) or -1 on failure.
+pub fn tcpOpen() isize {
+    return @bitCast(syscall1(SYS_tcp_open, 0));
+}
+
+/// Connect socket `sock` to `ip:port` from `src_port`. Blocks until connected or timeout.
+/// Returns 0 on success, negative on error.
+pub fn tcpConnect(sock: usize, ip: [4]u8, port: u16, src_port: u16) isize {
+    var ip_copy = ip;
+    return @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]   "{rax}" (SYS_tcp_connect),
+          [a1]  "{rdi}" (sock),
+          [a2]  "{rsi}" (@intFromPtr(&ip_copy)),
+          [a3]  "{rdx}" (@as(usize, port)),
+          [a4]  "{r10}" (@as(usize, src_port)),
+        : .{ .rcx = true, .r11 = true, .memory = true }));
+}
+
+/// Put socket into listen mode on `port`. Returns 0 or negative errno.
+pub fn tcpListen(sock: usize, port: u16) isize {
+    return @bitCast(syscall3(SYS_tcp_listen, sock, @as(usize, port), 0));
+}
+
+/// Non-blocking accept on `listen_sock`. Returns new socket index or -11 (EAGAIN).
+pub fn tcpAccept(listen_sock: usize) isize {
+    return @bitCast(syscall1(SYS_tcp_accept, listen_sock));
+}
+
+/// Send `data` on `sock`. Returns bytes sent (may be less than data.len).
+pub fn tcpSend(sock: usize, data: []const u8) isize {
+    return @bitCast(syscall3(SYS_tcp_send, sock, @intFromPtr(data.ptr), data.len));
+}
+
+/// Receive into `buf` from `sock`. Returns bytes read, 0=EOF, negative=error.
+pub fn tcpRecv(sock: usize, buf: []u8) isize {
+    return @bitCast(syscall3(SYS_tcp_recv, sock, @intFromPtr(buf.ptr), buf.len));
+}
+
+/// Close `sock`, initiating FIN handshake.
+pub fn tcpClose(sock: usize) void {
+    _ = syscall1(SYS_tcp_close, sock);
+}
+
+/// Query socket state. Returns 0=connected, 1=listening, 2=closed, 3=data_avail.
+pub fn tcpStatus(sock: usize) isize {
+    return @bitCast(syscall1(SYS_tcp_status, sock));
+}
 
 /// sleep(): sleep for `seconds` seconds (yields to other processes).
 pub fn sleep(seconds: usize) void {

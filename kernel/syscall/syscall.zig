@@ -14,8 +14,9 @@ const heap = @import("../mm/heap.zig");
 const usermode = @import("../arch/x86_64/usermode.zig");
 const pit = @import("../arch/x86_64/pit.zig");
 const users = @import("../proc/users.zig");
-const net   = @import("../net/net.zig");
-const tty   = @import("../tty.zig");
+const net     = @import("../net/net.zig");
+const rtl8139 = @import("../net/rtl8139.zig");
+const tty     = @import("../tty.zig");
 
 
 // Linux x86_64 syscall numbers (subset).
@@ -56,7 +57,17 @@ const SYS_net_ping:  usize = 1010; // ping(ip_ptr, timeout_ms) -> 0=ok, -1=timeo
 const SYS_net_send:  usize = 1011; // udpSend(dst_ip_ptr, sport, dport, buf_ptr, len)
 const SYS_net_recv:  usize = 1012; // udpRecv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr)
 const SYS_net_info:  usize = 1013;
-const SYS_tty_mode:  usize = 1020; // 0=canonical, 1=raw // write "ip mac" into buf
+// TCP socket syscalls (1014-1020 range)
+const SYS_tcp_open:    usize = 1014; // () -> sock_idx or -1
+const SYS_tcp_connect: usize = 1015; // (sock, ip_ptr, port, src_port) -> 0 ok/-1
+const SYS_tcp_listen:  usize = 1016; // (sock, port) -> 0 ok/-1
+const SYS_tcp_accept:  usize = 1017; // (listen_sock) -> new_sock or -1
+const SYS_tcp_send:    usize = 1018; // (sock, buf_ptr, len) -> bytes sent
+const SYS_tcp_recv:    usize = 1019; // (sock, buf_ptr, len) -> bytes or 0
+const SYS_tcp_close:   usize = 1021; // (sock) -> 0
+const SYS_tcp_status:  usize = 1022; // (sock) -> 0=connected,1=listen,2=closed,3=data
+const SYS_tty_mode:    usize = 1020;
+
 
 
 
@@ -616,7 +627,79 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_net_send  => sysNetSend(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_recv  => sysNetRecv(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_info  => sysNetInfo(a1, a2),
+        SYS_tcp_open    => sysTcpOpen(),
+        SYS_tcp_connect => sysTcpConnect(a1, a2, a3, tf.r10),
+        SYS_tcp_listen  => sysTcpListen(a1, a2),
+        SYS_tcp_accept  => sysTcpAccept(a1),
+        SYS_tcp_send    => sysTcpSend(a1, a2, a3),
+        SYS_tcp_recv    => sysTcpRecv(a1, a2, a3),
+        SYS_tcp_close   => sysTcpClose(a1),
+        SYS_tcp_status  => sysTcpStatus(a1),
         SYS_tty_mode  => sysTtyMode(a1),
         else => -ENOSYS,
     };
+}
+
+// ---- TCP syscall implementations --------------------------------------------
+
+fn sysTcpOpen() isize {
+    const idx = net.tcp.allocSock();
+    if (idx == 0xff) return -ENOMEM;
+    return @intCast(idx);
+}
+
+fn sysTcpConnect(sock: usize, ip_ptr: usize, port: usize, src_port: usize) isize {
+    const ip: *const [4]u8 = @ptrFromInt(ip_ptr);
+    const ok = net.tcp.connect(
+        @intCast(sock), ip.*, @intCast(port), @intCast(src_port),
+    );
+    if (!ok) return -EINVAL;
+    // Poll until connected or timeout (~3s).
+    var i: usize = 0;
+    while (i < 3_000_000) : (i += 100) {
+        rtl8139.pollRx();
+        if (net.tcp.isConnected(@intCast(sock))) return 0;
+        if (net.tcp.isClosed(@intCast(sock))) return -EINVAL;
+    }
+    return -EINVAL; // timeout
+}
+
+fn sysTcpListen(sock: usize, port: usize) isize {
+    const ok = net.tcp.listen(@intCast(sock), @intCast(port));
+    return if (ok) 0 else -EINVAL;
+}
+
+fn sysTcpAccept(listen_sock: usize) isize {
+    // Non-blocking: return -EAGAIN if nothing ready.
+    const idx = net.tcp.accept(@intCast(listen_sock));
+    if (idx == 0xff) return -11; // EAGAIN
+    return @intCast(idx);
+}
+
+fn sysTcpSend(sock: usize, buf_ptr: usize, len: usize) isize {
+    const buf: [*]const u8 = @ptrFromInt(buf_ptr);
+    const n = net.tcp.send(@intCast(sock), buf[0..len]);
+    return @intCast(n);
+}
+
+fn sysTcpRecv(sock: usize, buf_ptr: usize, len: usize) isize {
+    // Poll RX to process any incoming segments.
+    rtl8139.pollRx();
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    const n = net.tcp.rbufRead(@intCast(sock), buf[0..len]);
+    if (n == 0 and net.tcp.peerClosed(@intCast(sock))) return 0; // EOF
+    return @intCast(n);
+}
+
+fn sysTcpClose(sock: usize) isize {
+    net.tcp.close(@intCast(sock));
+    return 0;
+}
+
+fn sysTcpStatus(sock: usize) isize {
+    if (net.tcp.isConnected(@intCast(sock)))  return 0;
+    if (net.tcp.isListening(@intCast(sock)))  return 1;
+    if (net.tcp.isClosed(@intCast(sock)))     return 2;
+    if (net.tcp.hasData(@intCast(sock)))      return 3;
+    return 2;
 }
