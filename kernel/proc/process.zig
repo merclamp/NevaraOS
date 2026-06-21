@@ -227,6 +227,7 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
         }
     }
 
+    vfs.ensureLoaded(node);
     const image = node.data[0..node.size];
 
     // Commit: swap to a fresh address space and discard the old one.

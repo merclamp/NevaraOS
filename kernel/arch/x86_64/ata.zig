@@ -165,3 +165,7 @@ pub fn writeSector(lba: u32, buf: *const [SECTOR_SIZE]u8) bool {
 pub fn readSectorOn(drive: u1, lba: u32, buf: *[SECTOR_SIZE]u8) bool {
     return readImpl(drive, lba, buf);
 }
+/// Write one sector to an explicit drive (0 = master, 1 = slave).
+pub fn writeSectorOn(drive: u1, lba: u32, buf: *const [SECTOR_SIZE]u8) bool {
+    return writeImpl(drive, lba, buf);
+}

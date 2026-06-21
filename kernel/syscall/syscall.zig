@@ -325,6 +325,7 @@ fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
     const node = vfs.resolve(path) catch |e| return errnoFor(e);
 
     if (node.kind != .file) return -EINVAL;
+    vfs.ensureLoaded(node);
     const image = node.data[0..node.size];
 
     const a = heap.allocator();

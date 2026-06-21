@@ -196,8 +196,46 @@ pub fn build(b: *std.Build) void {
     const kernel_elf = link.addOutputFileArg("kernel");
     link.addFileArg(kernel_obj.getEmittedBin());
 
-    const install_kernel_bin = b.addInstallBinFile(kernel_elf, "kernel");
-    b.getInstallStep().dependOn(&install_kernel_bin.step);
+
+    // ---- ext4 rootfs image (ATA primary master) ----------------------------
+    // Build a minimal ext4 image containing /bin/* and /etc/hostname.
+    // The kernel mounts it as the VFS root on boot.  We rebuild it every
+    // time any of the embedded ELF binaries change.
+
+    // Step 1: assemble the rootfs staging directory and create the ext4 image.
+    // We pass ELF paths as explicit arguments so Zig can track their changes.
+    const mkrootfs = b.addSystemCommand(&.{ "sh", "-c",
+        // $1=zinit $2=nsh $3=nevbox $4=hello $5=init $6=output_img
+        \\ZINIT="$1" NSH="$2" NEVBOX="$3" HELLO="$4" INIT="$5" OUT="$6"
+        \\ROOTFS="$(dirname "$OUT")/rootfsdir"
+        \\rm -rf "$ROOTFS"
+        \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/dev" "$ROOTFS/tmp" "$ROOTFS/mnt"
+        \\cp "$ZINIT"  "$ROOTFS/bin/zinit"
+        \\cp "$NSH"    "$ROOTFS/bin/nsh"
+        \\cp "$NEVBOX" "$ROOTFS/bin/nevbox"
+        \\cp "$HELLO"  "$ROOTFS/bin/hello"
+        \\cp "$INIT"   "$ROOTFS/bin/init"
+        \\for APP in echo cat ls mkfile mkdir wc grep head tail cp touch seq tee \
+        \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
+        \\           yes basename dirname rm mv sleep; do
+        \\    ln -sf nevbox "$ROOTFS/bin/$APP"
+        \\done
+        \\printf 'nevara\n' > "$ROOTFS/etc/hostname"
+        \\printf 'root:x:0:0:root:/root:/bin/nsh\n' > "$ROOTFS/etc/passwd"
+        \\SIZE_KB=$(du -sk "$ROOTFS" | awk '{print $1}')
+        \\IMG_KB=$(( (SIZE_KB + 256 + 1023) / 1024 * 1024 ))
+        \\[ "$IMG_KB" -lt 16384 ] && IMG_KB=16384
+        \\mke2fs -q -F -t ext4 -b 1024 \
+        \\       -O ^has_journal,^metadata_csum,^64bit,^dir_index \
+        \\       -d "$ROOTFS" "$OUT" "${IMG_KB}"
+        , "--",
+    });
+    mkrootfs.addFileArg(zinit_elf);
+    mkrootfs.addFileArg(nsh_elf);
+    mkrootfs.addFileArg(nevbox_elf);
+    mkrootfs.addFileArg(hello_elf);
+    mkrootfs.addFileArg(user_elf);
+    const rootfs_img = mkrootfs.addOutputFileArg("rootfs.ext4");
 
     // ---- Bootable ISO via grub-mkrescue --------------------------------
     const iso_tree = "iso";
@@ -211,6 +249,12 @@ pub fn build(b: *std.Build) void {
         .{ .custom = iso_tree },
         "boot/grub/grub.cfg",
     );
+    // Embed the rootfs image inside the ISO so it is distributed in one file.
+    const install_rootfs = b.addInstallFileWithDir(
+        rootfs_img,
+        .{ .custom = iso_tree },
+        "boot/rootfs.ext4",
+    );
 
     const mkrescue = b.addSystemCommand(&.{"grub-mkrescue"});
     mkrescue.addArg("-o");
@@ -218,27 +262,26 @@ pub fn build(b: *std.Build) void {
     mkrescue.addArg(b.getInstallPath(.{ .custom = iso_tree }, ""));
     mkrescue.step.dependOn(&install_kernel.step);
     mkrescue.step.dependOn(&install_cfg.step);
-    // The directory is a plain string arg, so Zig can't see its contents
-    // change. Declare the real inputs so the ISO rebuilds when they change.
+    mkrescue.step.dependOn(&install_rootfs.step);
     mkrescue.addFileInput(kernel_elf);
     mkrescue.addFileInput(b.path("boot/grub/grub.cfg"));
+    mkrescue.addFileInput(rootfs_img);
 
     const install_iso = b.addInstallFile(iso_file, "nevara.iso");
-    const iso_step = b.step("iso", "Build a bootable GRUB ISO");
+    const iso_step = b.step("iso", "Build a bootable GRUB ISO (kernel + ext4 rootfs)");
     iso_step.dependOn(&install_iso.step);
 
-    // ---- Run in QEMU ----------------------------------------------------
-    // Create a 16 MiB raw disk the kernel formats as FAT16 on first boot.
-    const mkdisk = b.addSystemCommand(&.{
-        "sh", "-c",
-        "test -f zig-out/disk.img || { mkdir -p zig-out && dd if=/dev/zero of=zig-out/disk.img bs=1M count=16; }",
-    });
+    const install_kernel_bin = b.addInstallBinFile(kernel_elf, "kernel");
+    b.getInstallStep().dependOn(&install_kernel_bin.step);
 
-    // Create a small ext4 disk (read by the kernel) populated with test files.
-    const mkext = b.addSystemCommand(&.{
-        "sh", "-c",
-        "test -f zig-out/ext.img || { mkdir -p zig-out/extsrc/docs && printf 'hello from ext4\\n' > zig-out/extsrc/readme.txt && printf 'nested ext4 file\\n' > zig-out/extsrc/docs/note.txt && mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^dir_index -d zig-out/extsrc zig-out/ext.img 8192; }",
+    // ---- Run in QEMU ----------------------------------------------------
+    // Extract the rootfs from the ISO into zig-out/ for the -drive argument.
+    // We copy it from the build cache so QEMU always sees a fresh image.
+    const cp_rootfs = b.addSystemCommand(&.{ "sh", "-c",
+        "mkdir -p zig-out && cp \"$1\" zig-out/rootfs.ext4", "--",
     });
+    cp_rootfs.addFileArg(rootfs_img);
+    cp_rootfs.step.dependOn(&mkrootfs.step);
 
     const run = b.addSystemCommand(&.{"qemu-system-x86_64"});
     run.addArg("-cdrom");
@@ -248,12 +291,12 @@ pub fn build(b: *std.Build) void {
         "-no-reboot", "-no-shutdown",
         "-m",         "512M",
         "-vga",       "std",
-        "-boot",      "d", // boot from the CD-ROM (the FAT disk is data only)
-        "-drive",     "file=zig-out/disk.img,format=raw,if=ide,index=0,media=disk",
-        "-drive",     "file=zig-out/ext.img,format=raw,if=ide,index=1,media=disk",
+        "-boot",      "d",
+        // ext4 rootfs on ATA primary master (drive 0) — the kernel mounts
+        // it as the root filesystem via the read-only ext4 driver.
+        "-drive",     "file=zig-out/rootfs.ext4,format=raw,if=ide,index=0,media=disk",
     });
-    run.step.dependOn(&mkdisk.step);
-    run.step.dependOn(&mkext.step);
+    run.step.dependOn(&cp_rootfs.step);
     const run_step = b.step("run", "Boot Nevara OS in QEMU");
     run_step.dependOn(&run.step);
 }

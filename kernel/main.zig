@@ -17,7 +17,6 @@ const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
 const syscall = @import("syscall/syscall.zig");
 const usermode = @import("arch/x86_64/usermode.zig");
-const elf = @import("exec/elf.zig");
 
 comptime {
     _ = @import("lib/c.zig"); // export memcpy/memmove/memset/memcmp
@@ -68,14 +67,21 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         testVmm();
         heap.init();
         testHeap();
-        testVfs();
+        vfs.init() catch {
+            console.writeString("[vfs] init failed\n");
+            hang();
+        };
+        console.writeString("[vfs] root tmpfs + /dev ready\n");
+
         _ = ata.init();
-        vfs.mountFat(); // mount (or format) the FAT16 disk at /mnt
-        writeBootFile();
-        vfs.mountExt4(); // mount the ext4 disk read-only at /ext
+        // Mount the ext4 rootfs image (ATA primary master) as the VFS root.
+        // The tmpfs layer in vfs.init() already created /dev; ext4 content
+        // is added on top of it.  FAT is no longer used as primary storage.
+        if (!vfs.mountExt4AsRoot()) {
+            console.writeString("[boot] WARNING: ext4 rootfs not found on ATA master\n");
+        }
         usermode.init();
         process.init(); // scheduler + the kernel (kmain) process, stdio bound
-        installBinaries();
 
         // Turn on preemption (timer) and keyboard, then run userspace.
         pit.init(100);
@@ -202,111 +208,6 @@ fn testHeap() void {
     console.writeString(" KiB\n");
 }
 
-/// Exercise the in-memory VFS: directories, files, devices, and path lookup.
-fn testVfs() void {
-    vfs.init() catch {
-        console.writeString("[vfs] init failed\n");
-        return;
-    };
-    console.writeString("[vfs] mounted in-memory root with /dev\n");
-
-    _ = vfs.mkdir("/etc") catch return;
-    const f = vfs.create("/etc/hostname", .file) catch return;
-    _ = vfs.writeAt(f, "nevara\n", 0) catch return;
-
-    var buf: [64]u8 = undefined;
-    const node = vfs.resolve("/etc/hostname") catch return;
-    const n = vfs.readAt(node, &buf, 0) catch return;
-    console.writeString("[vfs] /etc/hostname -> \"");
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (buf[i] == '\n') break;
-        console.writeByte(buf[i]);
-    }
-    console.writeString("\" (");
-    console.writeDec(node.size);
-    console.writeString(" bytes)\n");
-
-    // Directory listing of /
-    console.writeString("[vfs] ls / :");
-    var idx: usize = 0;
-    while (vfs.readdir(vfs.root(), idx)) |child| : (idx += 1) {
-        console.writeString(" ");
-        console.writeString(child.name);
-        if (child.kind == .dir) console.writeString("/");
-    }
-    console.writeString("\n");
-
-    // /dev/zero yields zeros; /dev/null swallows writes.
-    var zbuf: [8]u8 = .{ 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
-    const zn = vfs.resolve("/dev/zero") catch return;
-    _ = vfs.readAt(zn, &zbuf, 0) catch return;
-    const nn = vfs.resolve("/dev/null") catch return;
-    const wrote = vfs.writeAt(nn, "discarded", 0) catch return;
-    console.writeString("[vfs] /dev/zero[0]=");
-    console.writeDec(zbuf[0]);
-    console.writeString(", /dev/null wrote=");
-    console.writeDec(wrote);
-    console.writeString("\n");
-}
-
-/// Write the embedded userland binaries into /bin (tmpfs) so processes can load
-/// can load them by path. NevBox is installed under several applet names
-/// (BusyBox-style) so the shell can run /bin/ls, /bin/cat, /bin/echo.
-fn installBinaries() void {
-    _ = vfs.mkdir("/bin") catch {};
-    install("/bin/zinit", @embedFile("zinit_elf"));
-    install("/bin/nsh", @embedFile("nsh_elf"));
-    install("/bin/hello", @embedFile("hello_elf"));
-    install("/bin/init", @embedFile("init_elf"));
-    const nevbox = @embedFile("nevbox_elf");
-    install("/bin/nevbox", nevbox);
-    // original applets
-    install("/bin/echo",   nevbox);
-    install("/bin/cat",    nevbox);
-    install("/bin/ls",     nevbox);
-    install("/bin/mkfile", nevbox);
-    install("/bin/mkdir",  nevbox);
-    // new applets
-    install("/bin/wc",     nevbox);
-    install("/bin/grep",   nevbox);
-    install("/bin/head",   nevbox);
-    install("/bin/tail",   nevbox);
-    install("/bin/cp",     nevbox);
-    install("/bin/touch",  nevbox);
-    install("/bin/seq",    nevbox);
-    install("/bin/tee",    nevbox);
-    install("/bin/true",   nevbox);
-    install("/bin/false",  nevbox);
-    install("/bin/uptime",   nevbox);
-    install("/bin/uname",    nevbox);
-    install("/bin/nevfetch", nevbox);
-    // new applets
-    install("/bin/sort",     nevbox);
-    install("/bin/uniq",     nevbox);
-    install("/bin/cut",      nevbox);
-    install("/bin/tr",       nevbox);
-    install("/bin/rev",      nevbox);
-    install("/bin/pwd",      nevbox);
-    install("/bin/yes",      nevbox);
-    install("/bin/basename", nevbox);
-    install("/bin/dirname",  nevbox);
-    install("/bin/rm",       nevbox);
-    install("/bin/mv",       nevbox);
-    install("/bin/sleep",    nevbox);
-}
-
-fn install(path: []const u8, bytes: []const u8) void {
-    const f = vfs.create(path, .file) catch return;
-    _ = vfs.writeAt(f, bytes, 0) catch {};
-}
-
-/// Drop a small file on the FAT disk so there is content to read back (and for
-/// the host to verify the on-disk format). Skipped if it already exists.
-fn writeBootFile() void {
-    const f = vfs.create("/mnt/boot.txt", .file) catch return;
-    _ = vfs.writeAt(f, "hello from nevara fat16\n", 0) catch {};
-}
 
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the
 /// kernel does not drag formatting machinery into a no-OS target.
