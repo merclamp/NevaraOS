@@ -53,19 +53,21 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   and `stdio.h` with a full `printf`/`sprintf`/`snprintf`/`sscanf`/`scanf`.
 - An interactive shell (**nsh**) with pipelines (`cmd1 | cmd2`), I/O redirection
   (`> file`, `>> file`, `< file`), background jobs (`cmd &`), shell variables
-  (`FOO=bar`, `$FOO`), and a `cd` builtin with a cwd-aware prompt
-  (`nevara:/etc$`).
+  (`FOO=bar`, `$FOO`), and a `cd` builtin. The prompt shows the current user
+  and working directory (`root@nevara:/#` in red, `user@nevara:/home/user$` in
+  green).
 - **ext4 as the primary read-write filesystem** — the root filesystem is a real
   ext4 volume mounted at `/`: files and directories created in the shell persist
   across reboots. The driver supports extent trees (depth-0 and depth-1 for
   files beyond ~4 MiB), block/inode allocation, directory entry management,
   inode timestamps, and file-permission bits with `chmod` — no journal, no
   checksums (matching the mke2fs flags used to build the image).
-- **45+ NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
+- **50+ NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
   `mv` `rm` `touch` `mkfile` `mkdir` `sort` `uniq` `cut` `tr` `rev` `pwd`
   `yes` `basename` `dirname` `seq` `tee` `true` `false` `sleep` `uptime`
   `uname` `nevfetch` `chmod` `find` `stat` `strings` `fold` `comm` `printf`
-  `which` `xargs` `ln` `env` `dd` `od` `nl` `du` — all in one multi-call
+  `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
+  `whoami` `id` `su` `useradd` `userdel` `passwd` — all in one multi-call
   binary, no libc.
 
 ## Current status
@@ -115,13 +117,16 @@ Twelve foundational stages are done and verified in QEMU:
 - ✅ **Working directory & relative paths** — every process tracks its own cwd
   (`chdir`/`getcwd` syscalls, Linux numbers 80/79). All path-taking syscalls
   resolve relative paths against the cwd with full `.`/`..` normalisation.
-- ✅ **Rich userland tooling** — **NevBox** provides 45+ applets covering text
-  processing, file management, system info, and binary inspection (`find`,
-  `stat`, `strings`, `dd`, `od`, `du`, `nl`, `fold`, `comm`, `printf`,
-  `which`, `xargs`, `ln`, `env`, and more). Shell variables (`FOO=bar`,
-  `$FOO` expansion) work in **nsh**. The PIT exports a 100 Hz `jiffies`
-  counter (`SYS_uptime = 1001`) so `uptime` and `nevfetch` show real elapsed
-  time.
+- ✅ **Rich userland tooling** — **NevBox** provides 50+ applets covering text
+  processing, file management, system info, and binary inspection. Shell
+  variables work in **nsh**. The PIT exports a 100 Hz `jiffies` counter so
+  `uptime` and `nevfetch` show real elapsed time.
+- ✅ **Users & permissions** — POSIX credentials (uid/gid/euid/egid) on every
+  process, inherited across `fork`/`execve`; a kernel user database (max 32
+  users, pre-seeded with root) persisted to `/etc/passwd`; `/home/` directory
+  for user home dirs; `useradd`/`userdel`/`su`/`whoami`/`id` applets;
+  `getuid`/`setuid`/`getgid`/`setgid` and custom `useradd`/`userdel`/
+  `getpwnam` syscalls; **nsh** prompt shows `user@nevara:path` with colour.
 
 ## Roadmap
 
@@ -135,8 +140,11 @@ What still needs to be built (roughly in order):
   `sscanf`/`scanf`, `calloc`/`realloc`, `strtol`/`strtoul`, `strtok`, and more.
 - ✅ **More NevBox applets** — `find`, `stat`, `strings`, `fold`, `comm`,
   `printf`, `which`, `xargs`, `ln`, `env`, `dd`, `od`, `nl`, `du` (15 new
-  applets; total now 45+).
-- ⏳ **Polish** — networking, users & permissions, a package manager, and more.
+  applets; total now 50+ with user-management applets).
+- ✅ **Users & permissions** — kernel uid/gid credentials, user DB, `/home`,
+  `useradd`/`userdel`/`su`/`whoami`/`id` NevBox applets, POSIX credential
+  syscalls, coloured `user@nevara` prompt in **nsh**.
+- ⏳ **Polish** — networking, package manager, and more.
 
 This is a marathon, not a sprint. Progress happens phase by phase.
 
@@ -248,8 +256,9 @@ The **ext4 driver** (`ext4.zig`) supports:
 On top sits a per-process file-descriptor table and a dispatcher keyed by the
 Linux x86_64 syscall numbers (read, write, open, close, lseek, getpid, brk,
 fork, execve, exit, wait4, mkdir, pipe, dup2, getdents64, chdir=80, getcwd=79,
-spawn=1000, uptime=1001, unlink=87, rename=82, sleep=1002, rmdir=84,
-chmod=90), returning
+spawn=1000, uptime=1001, unlink=87, rename=82, sleep=1002, rmdir=84, chmod=90,
+getuid=102, getgid=104, geteuid=107, getegid=108, setuid=105, setgid=106,
+useradd=1003, userdel=1004, getpwnam=1005), returning
 negative errno on failure. All path-taking syscalls resolve relative paths
 against the current process's cwd via an internal `toAbsPath` helper.
 
@@ -273,7 +282,7 @@ strchr/strstr/strdup/strtok/memmove/memcmp/memchr and more), `stdlib.h`
 (malloc/calloc/realloc/free/atoi/atol/strtol/strtoul/abs/abort …), `stdio.h`
 (printf/fprintf/sprintf/snprintf with full flags+width+precision, sscanf/scanf,
 puts/getchar/fputs/fflush …); on top sit **ZInit** (PID 1), **nsh** (the
-interactive shell), and **NevBox** (30+ applets).
+interactive shell), and **NevBox** (50+ applets).
 
 **Source layout.**
 
