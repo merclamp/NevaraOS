@@ -209,7 +209,8 @@ pub fn build(b: *std.Build) void {
         \\ZINIT="$1" NSH="$2" NEVBOX="$3" HELLO="$4" INIT="$5" OUT="$6"
         \\ROOTFS="$(dirname "$OUT")/rootfsdir"
         \\rm -rf "$ROOTFS"
-        \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/dev" "$ROOTFS/tmp" "$ROOTFS/mnt"
+        \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/tmp" "$ROOTFS/mnt" "$ROOTFS/root"
+
         \\cp "$ZINIT"  "$ROOTFS/bin/zinit"
         \\cp "$NSH"    "$ROOTFS/bin/nsh"
         \\cp "$NEVBOX" "$ROOTFS/bin/nevbox"
@@ -218,16 +219,17 @@ pub fn build(b: *std.Build) void {
         \\for APP in echo cat ls mkfile mkdir wc grep head tail cp touch seq tee \
         \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
         \\           yes basename dirname rm mv sleep; do
-        \\    ln -sf nevbox "$ROOTFS/bin/$APP"
+        \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
         \\printf 'nevara\n' > "$ROOTFS/etc/hostname"
         \\printf 'root:x:0:0:root:/root:/bin/nsh\n' > "$ROOTFS/etc/passwd"
         \\SIZE_KB=$(du -sk "$ROOTFS" | awk '{print $1}')
-        \\IMG_KB=$(( (SIZE_KB + 256 + 1023) / 1024 * 1024 ))
-        \\[ "$IMG_KB" -lt 16384 ] && IMG_KB=16384
+        \\IMG_KB=$(( (SIZE_KB + 4096 + 1023) / 1024 * 1024 ))
+        \\[ "$IMG_KB" -lt 65536 ] && IMG_KB=65536
         \\mke2fs -q -F -t ext4 -b 1024 \
         \\       -O ^has_journal,^metadata_csum,^64bit,^dir_index \
         \\       -d "$ROOTFS" "$OUT" "${IMG_KB}"
+        \\debugfs -w -R 'unlink lost+found' "$OUT" 2>/dev/null || true
         , "--",
     });
     mkrootfs.addFileArg(zinit_elf);

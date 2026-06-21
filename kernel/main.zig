@@ -209,6 +209,7 @@ fn testHeap() void {
 }
 
 
+
 /// Minimal freestanding panic handler. Avoids std.fmt/Writer entirely so the
 /// kernel does not drag formatting machinery into a no-OS target.
 pub const panic = std.debug.FullPanic(struct {

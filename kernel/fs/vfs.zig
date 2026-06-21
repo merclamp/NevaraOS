@@ -78,7 +78,11 @@ var root_node: *Node = undefined;
 
 fn loadExt(node: *Node) void {
     const buf = alloc.alloc(u8, node.size) catch return;
+    // ext4 uses global scratch buffers (inobuf, blk, extblk) — disable
+    // preemption for the duration so concurrent exec() calls can't race.
+    asm volatile ("cli");
     _ = ext4.readFile(node.ext_ino, buf);
+    asm volatile ("sti");
     node.data = buf;
 }
 

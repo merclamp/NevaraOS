@@ -73,6 +73,23 @@ var inobuf: [256]u8 = undefined;
 
 // ---- low-level I/O ----------------------------------------------------------
 
+// All public functions that touch global scratch buffers (inobuf, blk, extblk)
+// must run with interrupts disabled to prevent concurrent access from a
+// preempted concurrent exec() in another process.
+inline fn irqSave() u64 {
+    return asm volatile (
+        \\ pushfq
+        \\ popq %[f]
+        \\ cli
+        : [f] "=r" (-> u64),
+        :
+        : .{ .memory = true });
+}
+inline fn irqRestore(flags: u64) void {
+    if (flags & 0x200 != 0) asm volatile ("sti" ::: .{ .memory = true });
+}
+
+
 fn writeSector(lba: u32, buf: *const [SECTOR]u8) bool {
     return ata.writeSectorOn(DRIVE, lba, buf);
 }

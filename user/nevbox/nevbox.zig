@@ -682,7 +682,7 @@ fn appletNevfetch() void {
     nfLbl( L5, "Shell:  ", "nsh");
     nfLbl( L6, "CPU:    ", "Intel x86_64");
     nfLbl( L7, "Memory: ", "512 MiB");
-    nfLbl( L8, "Disk:   ", "FAT16 /mnt  ext4 /ext");
+    nfLbl( L8, "Disk:   ", "ext4 /");
     nfRow( L9, "");
     nfRow( LB, "");
     // 8 normal colours
