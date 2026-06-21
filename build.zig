@@ -242,7 +242,7 @@ pub fn build(b: *std.Build) void {
         \\           yes basename dirname rm mv sleep chmod \
         \\           find stat strings fold comm printf which xargs ln env dd od nl du \
         \\           whoami id su useradd userdel passwd \
-        \\           ping ifconfig; do
+        \\           ping ifconfig clear; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
         \\printf 'nevara\n'                            > "$ROOTFS/etc/hostname"

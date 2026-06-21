@@ -102,6 +102,7 @@ pub fn main() void {
     else if (eq(cmd, "passwd"))   appletPasswd()
     else if (eq(cmd, "ping"))     appletPing()
     else if (eq(cmd, "ifconfig")) appletIfconfig()
+    else if (eq(cmd, "clear"))    appletClear()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
@@ -109,8 +110,16 @@ pub fn main() void {
                     "find stat strings fold comm printf which xargs " ++
                     "ln env dd od nl du " ++
                     "whoami id su useradd userdel passwd " ++
-                    "ping ifconfig\n");
+                    "ping ifconfig clear\n");
 
+}
+// ---- clear -----------------------------------------------------------------
+
+fn appletClear() void {
+    // ESC[2J  — erase entire screen
+    // ESC[H   — move cursor to home (1,1)
+    // Same sequence used by Linux 'clear' command.
+    nstd.print("\x1b[2J\x1b[H");
 }
 
 // ---- echo ------------------------------------------------------------------
