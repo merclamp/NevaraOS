@@ -209,8 +209,9 @@ pub fn build(b: *std.Build) void {
         \\ZINIT="$1" NSH="$2" NEVBOX="$3" HELLO="$4" INIT="$5" OUT="$6"
         \\ROOTFS="$(dirname "$OUT")/rootfsdir"
         \\rm -rf "$ROOTFS"
-        \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/tmp" "$ROOTFS/mnt" "$ROOTFS/root"
-
+        \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/tmp" "$ROOTFS/mnt" \
+        \\          "$ROOTFS/root" "$ROOTFS/home" "$ROOTFS/etc/skel"
+        \\
         \\cp "$ZINIT"  "$ROOTFS/bin/zinit"
         \\cp "$NSH"    "$ROOTFS/bin/nsh"
         \\cp "$NEVBOX" "$ROOTFS/bin/nevbox"
@@ -219,11 +220,17 @@ pub fn build(b: *std.Build) void {
         \\for APP in echo cat ls mkfile mkdir wc grep head tail cp touch seq tee \
         \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
         \\           yes basename dirname rm mv sleep chmod \
-        \\           find stat strings fold comm printf which xargs ln env dd od nl du; do
+        \\           find stat strings fold comm printf which xargs ln env dd od nl du \
+        \\           whoami id su useradd userdel passwd; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
-        \\printf 'nevara\n' > "$ROOTFS/etc/hostname"
-        \\printf 'root:x:0:0:root:/root:/bin/nsh\n' > "$ROOTFS/etc/passwd"
+        \\printf 'nevara\n'                            > "$ROOTFS/etc/hostname"
+        \\printf 'root:x:0:0:root:/root:/bin/nsh\n'   > "$ROOTFS/etc/passwd"
+        \\printf 'root:x:0:\n'                         > "$ROOTFS/etc/group"
+        \\printf 'root:!:19900:0:99999:7:::\n'         > "$ROOTFS/etc/shadow"
+        \\printf '# /etc/skel/.profile\nexport HOME=/root\nexport TERM=vt100\n' \
+        \\       > "$ROOTFS/etc/skel/.profile"
+        \\cp "$ROOTFS/etc/skel/.profile" "$ROOTFS/root/.profile" 2>/dev/null || true
         \\SIZE_KB=$(du -sk "$ROOTFS" | awk '{print $1}')
         \\IMG_KB=$(( (SIZE_KB + 4096 + 1023) / 1024 * 1024 ))
         \\[ "$IMG_KB" -lt 65536 ] && IMG_KB=65536

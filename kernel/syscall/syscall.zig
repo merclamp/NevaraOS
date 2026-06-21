@@ -13,6 +13,7 @@ const vmm = @import("../mm/vmm.zig");
 const heap = @import("../mm/heap.zig");
 const usermode = @import("../arch/x86_64/usermode.zig");
 const pit = @import("../arch/x86_64/pit.zig");
+const users = @import("../proc/users.zig");
 
 
 // Linux x86_64 syscall numbers (subset).
@@ -40,10 +41,20 @@ const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
 const SYS_rmdir:  usize = 84;
 const SYS_chmod:  usize = 90;
+const SYS_getuid:  usize = 102;
+const SYS_getgid:  usize = 104;
+const SYS_setuid:  usize = 105;
+const SYS_setgid:  usize = 106;
+const SYS_geteuid: usize = 107;
+const SYS_getegid: usize = 108;
+const SYS_useradd: usize = 1003;
+const SYS_userdel: usize = 1004;
+const SYS_getpwnam: usize = 1005;
 
 
 
 // errno values (returned negated).
+const EPERM: isize = 1;
 const ENOENT: isize = 2;
 const EBADF: isize = 9;
 const ECHILD: isize = 10;
@@ -419,6 +430,82 @@ fn sysChmod(path_ptr: usize, mode: usize) isize {
     vfs.chmod(path, @intCast(mode & 0xFFF)) catch |e| return errnoFor(e);
     return 0;
 }
+fn sysGetuid()  isize { return @intCast(process.current().uid); }
+fn sysGetgid()  isize { return @intCast(process.current().gid); }
+fn sysGeteuid() isize { return @intCast(process.current().euid); }
+fn sysGetegid() isize { return @intCast(process.current().egid); }
+
+fn sysSetuid(uid: usize) isize {
+    const p = process.current();
+    if (p.euid != 0 and uid != p.uid) return -EPERM;
+    p.uid = @intCast(uid);
+    p.euid = @intCast(uid);
+    return 0;
+}
+
+fn sysSetgid(gid: usize) isize {
+    const p = process.current();
+    if (p.euid != 0 and gid != p.gid) return -EPERM;
+    p.gid = @intCast(gid);
+    p.egid = @intCast(gid);
+    return 0;
+}
+
+// SYS_useradd(name_ptr, home_ptr, shell_ptr) -> uid or -errno
+fn sysUseradd(name_ptr: usize, home_ptr: usize, shell_ptr: usize) isize {
+    if (process.current().euid != 0) return -EPERM;
+    return users.add(cstr(name_ptr), cstr(home_ptr), cstr(shell_ptr));
+}
+
+// SYS_userdel(name_ptr) -> 0 or -errno
+fn sysUserdel(name_ptr: usize) isize {
+    if (process.current().euid != 0) return -EPERM;
+    return if (users.remove(cstr(name_ptr))) 0 else -ENOENT;
+}
+
+/// Append s into buf[pos..limit-1], leaving room for a nul. Returns new pos.
+fn appendBuf(buf: [*]u8, pos: usize, limit: usize, s: []const u8) usize {
+    if (limit == 0 or pos + 1 >= limit) return pos;
+    const avail = limit - pos - 1;
+    const l = @min(s.len, avail);
+    @memcpy(buf[pos .. pos + l], s[0..l]);
+    return pos + l;
+}
+
+/// Format u32 as decimal into buf[10]. Returns slice of written digits.
+fn fmtU32Dec(v: u32, buf: *[10]u8) []const u8 {
+    if (v == 0) { buf[0] = '0'; return buf[0..1]; }
+    var i: usize = buf.len;
+    var n = v;
+    while (n > 0) : (n /= 10) {
+        i -= 1;
+        buf[i] = '0' + @as(u8, @intCast(n % 10));
+    }
+    return buf[i..];
+}
+
+// SYS_getpwnam(name_ptr, buf_ptr, buf_len) -> 0 or -errno
+// Writes "name:x:uid:gid::home:shell\0" into buf.
+fn sysGetpwnam(name_ptr: usize, buf_ptr: usize, buf_len: usize) isize {
+    const u = users.findByName(cstr(name_ptr)) orelse return -ENOENT;
+    if (buf_len == 0) return -EINVAL;
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    var pos: usize = 0;
+    pos = appendBuf(buf, pos, buf_len, u.nameslice());
+    pos = appendBuf(buf, pos, buf_len, ":x:");
+    var nbuf: [10]u8 = undefined;
+    pos = appendBuf(buf, pos, buf_len, fmtU32Dec(u.uid, &nbuf));
+    pos = appendBuf(buf, pos, buf_len, ":");
+    var gbuf: [10]u8 = undefined;
+    pos = appendBuf(buf, pos, buf_len, fmtU32Dec(u.gid, &gbuf));
+    pos = appendBuf(buf, pos, buf_len, "::");
+    pos = appendBuf(buf, pos, buf_len, u.homeslice());
+    pos = appendBuf(buf, pos, buf_len, ":");
+    pos = appendBuf(buf, pos, buf_len, u.shellslice());
+    if (pos < buf_len) buf[pos] = 0;
+    return 0;
+}
+
 
 
 pub fn handle(tf: *usermode.TrapFrame) isize {
@@ -456,6 +543,15 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_sleep  => sysSleep(a1),
         SYS_rmdir  => sysRmdir(a1),
         SYS_chmod  => sysChmod(a1, a2),
+        SYS_getuid   => sysGetuid(),
+        SYS_getgid   => sysGetgid(),
+        SYS_geteuid  => sysGeteuid(),
+        SYS_getegid  => sysGetegid(),
+        SYS_setuid   => sysSetuid(a1),
+        SYS_setgid   => sysSetgid(a1),
+        SYS_useradd  => sysUseradd(a1, a2, a3),
+        SYS_userdel  => sysUserdel(a1),
+        SYS_getpwnam => sysGetpwnam(a1, a2, a3),
         else => -ENOSYS,
     };
 }

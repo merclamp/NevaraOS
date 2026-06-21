@@ -199,14 +199,72 @@ pub fn main() void {
 
     while (true) {
         reapBackground();
-        // Prompt: show cwd before the '$'.
+        // Prompt: "user@nevara:cwd$ " (root gets '#').
         var cwd_buf: [256]u8 = undefined;
         cwd_buf[0] = '/'; cwd_buf[1] = 0;
         const n_cwd = nstd.getcwd(&cwd_buf);
         const cwd_end: usize = if (n_cwd > 1) @intCast(n_cwd - 1) else 1;
-        nstd.print("\x1b[1;32mnevara:");
+
+        const uid = nstd.getuid();
+        const is_root = (uid == 0);
+
+        // Resolve username from /etc/passwd.
+        var uname: [32]u8 = [_]u8{ 'r', 'o', 'o', 't' } ++ [_]u8{0} ** 28;
+        var uname_len: usize = if (is_root) 4 else 0;
+        if (!is_root) {
+            var pbuf: [2048]u8 = undefined;
+            const pfd = nstd.open("/etc/passwd", 0);
+            if (pfd >= 0) {
+                const pn = nstd.read(@intCast(pfd), &pbuf);
+                nstd.close(@intCast(pfd));
+                var pit = std.mem.tokenizeScalar(u8, pbuf[0..pn], '\n');
+                outer: while (pit.next()) |pl| {
+                    var col: usize = 0;
+                    var ne: usize = 0;
+                    var us: usize = 0;
+                    var ue: usize = 0;
+                    for (pl, 0..) |c, idx| {
+                        if (c == ':') {
+                            col += 1;
+                            if (col == 1) ne = idx;
+                            if (col == 2) us = idx + 1;
+                            if (col == 3) { ue = idx; break; }
+                        }
+                    }
+                    if (ue == 0) continue;
+                    var v: u32 = 0;
+                    for (pl[us..ue]) |c| {
+                        if (c < '0' or c > '9') continue :outer;
+                        v = v * 10 + (c - '0');
+                    }
+                    if (v == uid) {
+                        uname_len = @min(ne, uname.len);
+                        @memcpy(uname[0..uname_len], pl[0..uname_len]);
+                        break;
+                    }
+                }
+            }
+            if (uname_len == 0) {
+                // Fallback: numeric uid.
+                var tmp: [10]u8 = undefined;
+                var i: usize = tmp.len;
+                var n2 = uid;
+                if (n2 == 0) { i -= 1; tmp[i] = '0'; }
+                else while (n2 > 0) : (n2 /= 10) { i -= 1; tmp[i] = '0' + @as(u8, @intCast(n2 % 10)); }
+                uname_len = tmp.len - i;
+                @memcpy(uname[0..uname_len], tmp[i..]);
+            }
+        }
+
+        if (is_root) {
+            nstd.print("\x1b[1;31m"); // red for root
+        } else {
+            nstd.print("\x1b[1;32m"); // green for users
+        }
+        _ = nstd.write(1, uname[0..uname_len]);
+        nstd.print("@nevara:");
         nstd.print(cwd_buf[0..cwd_end]);
-        nstd.print("$\x1b[0m ");
+        nstd.print(if (is_root) "#\x1b[0m " else "$\x1b[0m ");
 
         const n = nstd.read(0, line[0 .. line.len - 1]);
         if (n == 0) continue;

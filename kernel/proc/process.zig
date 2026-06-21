@@ -43,7 +43,11 @@ pub const Process = struct {
     // Current working directory (absolute path, kernel-owned buffer).
     cwd: [256]u8 = [_]u8{'/'} ++ [_]u8{0} ** 255,
     cwd_len: usize = 1,
-
+    // POSIX credentials.
+    uid: u32 = 0,   // real user id
+    gid: u32 = 0,   // real group id
+    euid: u32 = 0,  // effective user id
+    egid: u32 = 0,  // effective group id
 
     start: StartKind = .kernel,
     image: []const u8 = &.{},
@@ -149,6 +153,10 @@ pub fn spawnImage(image: []const u8, args: []const []const u8) i32 {
         .fds = parent.fds,
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
+        .uid = parent.uid,
+        .gid = parent.gid,
+        .euid = parent.euid,
+        .egid = parent.egid,
         .start = .run_image,
         .image = image,
     };
@@ -182,6 +190,10 @@ pub fn fork(tf: *const usermode.TrapFrame) isize {
         .fds = parent.fds,
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
+        .uid = parent.uid,
+        .gid = parent.gid,
+        .euid = parent.euid,
+        .egid = parent.egid,
         .start = .fork_resume,
     };
     // Bump the pipe writers count for every write-end fd inherited by the child.

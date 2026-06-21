@@ -17,6 +17,7 @@ const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
 const syscall = @import("syscall/syscall.zig");
 const usermode = @import("arch/x86_64/usermode.zig");
+const users_mod = @import("proc/users.zig");
 
 comptime {
     _ = @import("lib/c.zig"); // export memcpy/memmove/memset/memcmp
@@ -80,6 +81,7 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         if (!vfs.mountExt4AsRoot()) {
             console.writeString("[boot] WARNING: ext4 rootfs not found on ATA master\n");
         }
+        users_mod.loadPasswd();
         usermode.init();
         process.init(); // scheduler + the kernel (kmain) process, stdio bound
 

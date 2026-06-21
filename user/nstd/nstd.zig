@@ -24,7 +24,16 @@ const SYS_unlink: usize = 87;
 const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
 const SYS_rmdir:  usize = 84;
-const SYS_chmod:  usize = 90;
+const SYS_chmod:   usize = 90;
+const SYS_getuid:  usize = 102;
+const SYS_getgid:  usize = 104;
+const SYS_setuid:  usize = 105;
+const SYS_setgid:  usize = 106;
+const SYS_geteuid: usize = 107;
+const SYS_getegid: usize = 108;
+const SYS_useradd: usize = 1003;
+const SYS_userdel: usize = 1004;
+const SYS_getpwnam: usize = 1005;
 
 
 
@@ -134,6 +143,43 @@ pub fn renameFile(old: [*:0]const u8, new: [*:0]const u8) isize {
 pub fn chmodFile(path: [*:0]const u8, mode: usize) isize {
     return @bitCast(syscall3(SYS_chmod, @intFromPtr(path), mode, 0));
 }
+/// getuid(): real user id of the current process.
+pub fn getuid() u32 { return @truncate(syscall1(SYS_getuid, 0)); }
+
+/// getgid(): real group id of the current process.
+pub fn getgid() u32 { return @truncate(syscall1(SYS_getgid, 0)); }
+
+/// geteuid(): effective user id.
+pub fn geteuid() u32 { return @truncate(syscall1(SYS_geteuid, 0)); }
+
+/// getegid(): effective group id.
+pub fn getegid() u32 { return @truncate(syscall1(SYS_getegid, 0)); }
+
+/// setuid(): set real and effective uid. Returns 0 or negative errno.
+pub fn setuid(uid: u32) isize {
+    return @bitCast(syscall1(SYS_setuid, uid));
+}
+
+/// setgid(): set real and effective gid. Returns 0 or negative errno.
+pub fn setgid(gid: u32) isize {
+    return @bitCast(syscall1(SYS_setgid, gid));
+}
+
+/// useradd(name, home, shell): create a new user. Root only. Returns uid or -errno.
+pub fn useradd(name: [*:0]const u8, home: [*:0]const u8, shell: [*:0]const u8) isize {
+    return @bitCast(syscall3(SYS_useradd, @intFromPtr(name), @intFromPtr(home), @intFromPtr(shell)));
+}
+
+/// userdel(name): remove a user. Root only. Returns 0 or -errno.
+pub fn userdel(name: [*:0]const u8) isize {
+    return @bitCast(syscall1(SYS_userdel, @intFromPtr(name)));
+}
+
+/// getpwnam(name, buf, len): write "name:x:uid:gid::home:shell\0" into buf. Returns 0 or -errno.
+pub fn getpwnam(name: [*:0]const u8, buf: []u8) isize {
+    return @bitCast(syscall3(SYS_getpwnam, @intFromPtr(name), @intFromPtr(buf.ptr), buf.len));
+}
+
 /// sleep(): sleep for `seconds` seconds (yields to other processes).
 pub fn sleep(seconds: usize) void {
     _ = syscall1(SYS_sleep, seconds);

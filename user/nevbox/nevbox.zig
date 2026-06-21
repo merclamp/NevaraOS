@@ -94,12 +94,19 @@ pub fn main() void {
     else if (eq(cmd, "od"))       appletOd()
     else if (eq(cmd, "nl"))       appletNl()
     else if (eq(cmd, "du"))       appletDu()
+    else if (eq(cmd, "whoami"))   appletWhoami()
+    else if (eq(cmd, "id"))       appletId()
+    else if (eq(cmd, "su"))       appletSu()
+    else if (eq(cmd, "useradd"))  appletUseradd()
+    else if (eq(cmd, "userdel"))  appletUserdel()
+    else if (eq(cmd, "passwd"))   appletPasswd()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
                     "pwd yes basename dirname rm mv sleep chmod " ++
                     "find stat strings fold comm printf which xargs " ++
-                    "ln env dd od nl du\n");
+                    "ln env dd od nl du " ++
+                    "whoami id su useradd userdel passwd\n");
 
 }
 
@@ -1954,4 +1961,224 @@ fn appletDu() void {
         @memcpy(buf[0..alen], a[0..alen]);
         _ = duPath(buf[0..alen], summarize, 0);
     }
+}
+
+// ---- whoami ----------------------------------------------------------------
+fn appletWhoami() void {
+    const uid = nstd.getuid();
+    if (uid == 0) {
+        nstd.print("root\n");
+        return;
+    }
+    // Look up name via getpwnam by uid — we need to scan /etc/passwd.
+    var buf: [4096]u8 = undefined;
+    const fd_raw = nstd.open("/etc/passwd", 0);
+    if (fd_raw < 0) { nstd.printDec(uid); nstd.print("\n"); return; }
+    const n = nstd.read(@intCast(fd_raw), &buf);
+    nstd.close(@intCast(fd_raw));
+    var it = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+    while (it.next()) |line| {
+        // name:x:uid:...
+        var col: usize = 0;
+        var name_end: usize = 0;
+        var uid_start: usize = 0;
+        var uid_end: usize = 0;
+        var ci: usize = 0;
+        for (line, 0..) |c, i| {
+            if (c == ':') {
+                col += 1;
+                if (col == 1) name_end = i;
+                if (col == 2) uid_start = i + 1;
+                if (col == 3) { uid_end = i; break; }
+                ci = i;
+            }
+        }
+        if (uid_end == 0) continue;
+        const file_uid = parseNat(line[uid_start..uid_end]) orelse continue;
+        if (file_uid == uid) {
+            _ = nstd.write(1, line[0..name_end]);
+            nstd.print("\n");
+            return;
+        }
+    }
+    nstd.printDec(uid);
+    nstd.print("\n");
+}
+
+// ---- id --------------------------------------------------------------------
+fn appletId() void {
+    const uid = nstd.getuid();
+    const gid = nstd.getgid();
+    const euid = nstd.geteuid();
+    const egid = nstd.getegid();
+
+    // Resolve name for uid.
+    var uname: [32]u8 = undefined;
+    var uname_len: usize = 0;
+    var gname: [32]u8 = undefined;
+    var gname_len: usize = 0;
+
+    var pbuf: [4096]u8 = undefined;
+    const pfd = nstd.open("/etc/passwd", 0);
+    if (pfd >= 0) {
+        const pn = nstd.read(@intCast(pfd), &pbuf);
+        nstd.close(@intCast(pfd));
+        var it = std.mem.tokenizeScalar(u8, pbuf[0..pn], '\n');
+        while (it.next()) |line| {
+            var col: usize = 0;
+            var ne: usize = 0;
+            var us: usize = 0;
+            var ue: usize = 0;
+            for (line, 0..) |c, i| {
+                if (c == ':') {
+                    col += 1;
+                    if (col == 1) ne = i;
+                    if (col == 2) us = i + 1;
+                    if (col == 3) { ue = i; break; }
+                }
+            }
+            if (ue == 0) continue;
+            const fu = parseNat(line[us..ue]) orelse continue;
+            if (fu == uid) {
+                uname_len = @min(ne, uname.len);
+                @memcpy(uname[0..uname_len], line[0..uname_len]);
+            }
+            if (fu == gid) {
+                gname_len = @min(ne, gname.len);
+                @memcpy(gname[0..gname_len], line[0..gname_len]);
+            }
+        }
+    }
+
+    nstd.print("uid="); nstd.printDec(uid);
+    nstd.print("(");
+    if (uname_len > 0) _ = nstd.write(1, uname[0..uname_len])
+    else nstd.printDec(uid);
+    nstd.print(") gid="); nstd.printDec(gid);
+    nstd.print("(");
+    if (gname_len > 0) _ = nstd.write(1, gname[0..gname_len])
+    else nstd.printDec(gid);
+    nstd.print(") euid="); nstd.printDec(euid);
+    nstd.print(" egid="); nstd.printDec(egid);
+    nstd.print("\n");
+}
+
+// ---- su --------------------------------------------------------------------
+// su [user] — switch user (simple: only root can su to others; others can su to root with password stub)
+fn appletSu() void {
+    const target = nstd.arg(1) orelse "root";
+    const cur_uid = nstd.geteuid();
+
+    if (std.mem.eql(u8, target, "root")) {
+        if (cur_uid != 0) {
+            // Stub: in a real system we'd ask for password. For now, deny.
+            nstd.print("su: Authentication failure\n");
+            return;
+        }
+    }
+
+    if (cur_uid != 0) {
+        nstd.print("su: Permission denied\n");
+        return;
+    }
+
+    // Root: look up target user in /etc/passwd.
+    var pbuf: [4096]u8 = undefined;
+    const pfd = nstd.open("/etc/passwd", 0);
+    if (pfd < 0) { nstd.print("su: cannot open /etc/passwd\n"); return; }
+    const pn = nstd.read(@intCast(pfd), &pbuf);
+    nstd.close(@intCast(pfd));
+
+    var it = std.mem.tokenizeScalar(u8, pbuf[0..pn], '\n');
+    while (it.next()) |line| {
+        // name:x:uid:gid::home:shell
+        var fields: [7][]const u8 = .{""} ** 7;
+        var fi: usize = 0;
+        var fit = std.mem.tokenizeScalar(u8, line, ':');
+        while (fit.next()) |f| : (fi += 1) { if (fi < 7) fields[fi] = f; }
+        if (fi < 7) continue;
+        if (!std.mem.eql(u8, fields[0], target)) continue;
+
+        const uid: u32 = @intCast(parseNat(fields[2]) orelse continue);
+        const gid: u32 = @intCast(parseNat(fields[3]) orelse continue);
+        _ = nstd.setuid(uid);
+        _ = nstd.setgid(gid);
+
+        // Exec target's shell.
+        var shell_buf: [64]u8 = undefined;
+        const slen = @min(fields[6].len, shell_buf.len - 1);
+        @memcpy(shell_buf[0..slen], fields[6][0..slen]);
+        shell_buf[slen] = 0;
+        const shell: [*:0]const u8 = @ptrCast(&shell_buf);
+
+        var argv: [2]?[*:0]const u8 = .{ shell, null };
+        _ = nstd.execve(shell, @ptrCast(&argv));
+        nstd.print("su: exec failed\n");
+        return;
+    }
+    nstd.print("su: user not found: "); nstd.print(target); nstd.print("\n");
+}
+
+// ---- useradd ---------------------------------------------------------------
+// useradd <username> [home] [shell]
+fn appletUseradd() void {
+    const name = nstd.argZ(1) orelse {
+        nstd.print("usage: useradd <username> [home] [shell]\n");
+        return;
+    };
+    const name_s = nstd.arg(1).?;
+
+    // Build default home: /home/<name>
+    var home_buf: [64]u8 = undefined;
+    var hlen: usize = 0;
+    const prefix = "/home/";
+    @memcpy(home_buf[0..prefix.len], prefix);
+    hlen = prefix.len;
+    const nlen = @min(name_s.len, home_buf.len - hlen - 1);
+    @memcpy(home_buf[hlen..hlen + nlen], name_s[0..nlen]);
+    hlen += nlen;
+    home_buf[hlen] = 0;
+    const home_default: [*:0]const u8 = @ptrCast(&home_buf);
+
+    const home: [*:0]const u8 = nstd.argZ(2) orelse home_default;
+    const shell: [*:0]const u8 = nstd.argZ(3) orelse "/bin/nsh";
+
+    const uid = nstd.useradd(name, home, shell);
+    if (uid < 0) {
+        nstd.print("useradd: failed (");
+        nstd.printDec(@as(u64, @bitCast(-uid)));
+        nstd.print(")\n");
+        return;
+    }
+    // Create home directory.
+    _ = nstd.mkdir(home);
+    nstd.print("useradd: created user ");
+    nstd.print(name_s);
+    nstd.print(" uid=");
+    nstd.printDec(@intCast(uid));
+    nstd.print("\n");
+}
+
+// ---- userdel ---------------------------------------------------------------
+// userdel <username>
+fn appletUserdel() void {
+    const name = nstd.argZ(1) orelse {
+        nstd.print("usage: userdel <username>\n");
+        return;
+    };
+    const r = nstd.userdel(name);
+    if (r < 0) {
+        nstd.print("userdel: failed\n");
+    } else {
+        nstd.print("userdel: removed ");
+        nstd.print(nstd.arg(1).?);
+        nstd.print("\n");
+    }
+}
+
+// ---- passwd ----------------------------------------------------------------
+// passwd — stub: print a message (real password hashing needs crypto)
+fn appletPasswd() void {
+    nstd.print("passwd: password changing not yet implemented\n");
+    nstd.print("       (use useradd to create users with no password)\n");
 }
