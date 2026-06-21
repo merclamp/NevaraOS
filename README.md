@@ -170,7 +170,7 @@ services, with the desktop as the final milestone.
 - ✅ **Networking end-to-end test** — `ping -c 3 10.0.2.2` → 3/3 received from
   QEMU SLIRP; ARP cache populated; IRQ11 confirmed. Done.
 
-- ⏳ **TCP stack** — implement TCP (SYN/ACK state machine, retransmit timer,
+- ✅ **TCP stack** — implement TCP (SYN/ACK state machine, retransmit timer,
   sliding window); expose `connect`/`accept`/`send`/`recv` as BSD-socket-style
   syscalls (`SYS_socket=41`, `SYS_connect=42`, `SYS_accept=43`, etc.).
 - ⏳ **nved text editor** — finish the nano-style editor started in Phase I:
