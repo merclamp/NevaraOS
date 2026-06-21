@@ -48,7 +48,9 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 - A clean, modular kernel where every piece is meant to be understandable.
 - Runs real ring-3 programs from a built-in ELF loader, including an init
   system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
-  C library (**ZLibc**) — all written in Zig, no external libc.
+  C library (**ZLibc**) — all written in Zig, no external libc. ZLibc now
+  covers `ctype.h`, `string.h` (20 functions), `stdlib.h` (13 functions),
+  and `stdio.h` with a full `printf`/`sprintf`/`snprintf`/`sscanf`/`scanf`.
 - An interactive shell (**nsh**) with pipelines (`cmd1 | cmd2`), I/O redirection
   (`> file`, `>> file`, `< file`), background jobs (`cmd &`), shell variables
   (`FOO=bar`, `$FOO`), and a `cd` builtin with a cwd-aware prompt
@@ -123,8 +125,10 @@ What still needs to be built (roughly in order):
 - ✅ **ext4 write hardening** — large files (depth-1 extent index nodes for
   files beyond ~4 MiB), inode timestamps (atime/mtime/ctime from PIT jiffies),
   and file-permission bits with `chmod` (syscall 90, NevBox applet).
-- ⏳ **More userland** — additional NevBox applets (`find`, …),
-  a richer ZLibc (`printf`, `scanf`, …).
+- ✅ **Richer ZLibc** — `ctype.h` (12 functions), `string.h` (20 functions),
+  `stdlib.h` (13 functions), `stdio.h` with full `printf`/`sprintf`/`snprintf`/
+  `sscanf`/`scanf`, `calloc`/`realloc`, `strtol`/`strtoul`, `strtok`, and more.
+- ⏳ **More userland** — additional NevBox applets (`find`, …).
 - ⏳ **Polish** — networking, users & permissions, a package manager, and more.
 
 This is a marathon, not a sprint. Progress happens phase by phase.
@@ -255,8 +259,13 @@ same way. An ELF64 loader maps static executables into per-process address
 spaces. The process syscalls are real: `fork` deep-copies the caller's user
 pages, `execve` swaps in a new image, `wait4`/`waitpid` reap a zombie child,
 and `exit` turns a process into a zombie until its parent reaps it. Userland is
-built on two Zig runtimes — **nstd** (native, libc-free) and **ZLibc** (a small
-C library compiled by `zig cc`); on top sit **ZInit** (PID 1), **nsh** (the
+built on two Zig runtimes — **nstd** (native, libc-free) and **ZLibc** (a C
+library written in Zig, compiled by `zig cc`): `ctype.h` (12 classification and
+conversion functions), `string.h` (20 functions: strlen/strcpy/strcat/strcmp/
+strchr/strstr/strdup/strtok/memmove/memcmp/memchr and more), `stdlib.h`
+(malloc/calloc/realloc/free/atoi/atol/strtol/strtoul/abs/abort …), `stdio.h`
+(printf/fprintf/sprintf/snprintf with full flags+width+precision, sscanf/scanf,
+puts/getchar/fputs/fflush …); on top sit **ZInit** (PID 1), **nsh** (the
 interactive shell), and **NevBox** (30+ applets).
 
 **Source layout.**
