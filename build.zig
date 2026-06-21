@@ -154,28 +154,25 @@ pub fn build(b: *std.Build) void {
     c_link.addFileArg(hello_o);
     c_link.addFileArg(zlibc_obj.getEmittedBin());
 
-    // Compile nved.c (kilo editor) — same pattern as hello.c
-    const nved_cc = b.addSystemCommand(&.{ b.graph.zig_exe, "cc" });
-    nved_cc.addArgs(&.{
-        "-target",        "x86_64-freestanding",
-        "-ffreestanding", "-nostdlib",
-        "-nostdinc",      "-fno-stack-protector",
-        "-mcmodel=large", "-O2",
-        "-Wno-implicit-function-declaration",
-        "-Wno-int-conversion",
-        "-c",
+    // nved — Nevara Visual EDitor (written in Zig, uses nstd).
+    const nved_mod = b.createModule(.{
+        .root_source_file = b.path("user/nved/nved.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .code_model = .large,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .pic = false,
+        .strip = true,
     });
-    nved_cc.addPrefixedDirectoryArg("-I", b.path("zlibc/include"));
-    nved_cc.addFileArg(b.path("user/nved/nved.c"));
-    nved_cc.addArg("-o");
-    const nved_o = nved_cc.addOutputFileArg("nved.o");
-
+    nved_mod.addImport("nstd", nstd_mod);
+    const nved_obj = b.addObject(.{ .name = "nved", .root_module = nved_mod });
     const nved_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
     nved_link.addFileArg(b.path("user/linker.ld"));
     nved_link.addArg("-o");
     const nved_elf = nved_link.addOutputFileArg("nved.elf");
-    nved_link.addFileArg(nved_o);
-    nved_link.addFileArg(zlibc_obj.getEmittedBin());
+    nved_link.addFileArg(nved_obj.getEmittedBin());
     // We do NOT let Zig do the final link:
     //   * Zig's `-flld` path SEGVs on this freestanding target (0.16 bug),
     //   * Zig's self-hosted linker ignores the linker script's SECTIONS, which
