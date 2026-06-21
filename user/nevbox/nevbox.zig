@@ -645,18 +645,13 @@ fn appletUname() void {
 }
 
 // ---- nevfetch --------------------------------------------------------------
-//
-// ASCII art: a big N (16 chars wide) side-by-side with system info.
-// Logo lines are all exactly 16 visible chars, padded with spaces.
 
-// Print one row: [cyan logo] + [reset] + [info] + newline.
 fn nfRow(logo: []const u8, info: []const u8) void {
     nstd.print("\x1b[1;36m"); nstd.print(logo);
     nstd.print("\x1b[0m  ");  nstd.print(info);
     nstd.print("\n");
 }
 
-// Print one row with a bold label + plain value.
 fn nfLbl(logo: []const u8, label: []const u8, val: []const u8) void {
     nstd.print("\x1b[1;36m"); nstd.print(logo);
     nstd.print("\x1b[0m  \x1b[1m"); nstd.print(label);
@@ -664,7 +659,6 @@ fn nfLbl(logo: []const u8, label: []const u8, val: []const u8) void {
     nstd.print("\n");
 }
 
-// Format HH:MM:SS from jiffies (100 Hz) into buf[0..8].
 fn nfFmtUptime(buf: *[16]u8) []const u8 {
     const ticks = nstd.uptimeTicks();
     const secs = ticks / 100;
@@ -682,39 +676,186 @@ fn nfFmtUptime(buf: *[16]u8) []const u8 {
     return buf[0..8];
 }
 
+/// Read a one-line file, strip trailing whitespace, return slice into buf.
+fn nfReadFile(path: [*:0]const u8, buf: []u8) []const u8 {
+    const fd_raw = nstd.open(path, 0);
+    if (fd_raw < 0) return "unknown";
+    const n = nstd.read(@intCast(fd_raw), buf);
+    nstd.close(@intCast(fd_raw));
+    if (n == 0) return "unknown";
+    var end = n;
+    while (end > 0 and (buf[end - 1] == '\n' or buf[end - 1] == '\r' or buf[end - 1] == ' ')) end -= 1;
+    return buf[0..end];
+}
+
+/// Resolve username for the current process uid from /etc/passwd.
+fn nfGetUser(buf: []u8) []const u8 {
+    const uid = nstd.getuid();
+    if (uid == 0) { @memcpy(buf[0..4], "root"); return buf[0..4]; }
+    var pbuf: [2048]u8 = undefined;
+    const pfd = nstd.open("/etc/passwd", 0);
+    if (pfd < 0) return "unknown";
+    const pn = nstd.read(@intCast(pfd), &pbuf);
+    nstd.close(@intCast(pfd));
+    var it = std.mem.tokenizeScalar(u8, pbuf[0..pn], '\n');
+    while (it.next()) |line| {
+        var col: usize = 0;
+        var ne: usize = 0;
+        var us: usize = 0;
+        var ue: usize = 0;
+        for (line, 0..) |c, i| {
+            if (c == ':') {
+                col += 1;
+                if (col == 1) ne = i;
+                if (col == 2) us = i + 1;
+                if (col == 3) { ue = i; break; }
+            }
+        }
+        if (ue == 0) continue;
+        var v: u32 = 0;
+        var bad = false;
+        for (line[us..ue]) |c| {
+            if (c < '0' or c > '9') { bad = true; break; }
+            v = v * 10 + (c - '0');
+        }
+        if (bad or v != uid) continue;
+        const l = @min(ne, buf.len);
+        @memcpy(buf[0..l], line[0..l]);
+        return buf[0..l];
+    }
+    return "unknown";
+}
+
+/// Get the login shell for the current user (last field in /etc/passwd),
+/// strip /bin/ prefix for brevity.
+fn nfGetShell(buf: []u8) []const u8 {
+    const uid = nstd.getuid();
+    var pbuf: [2048]u8 = undefined;
+    const pfd = nstd.open("/etc/passwd", 0);
+    if (pfd < 0) { @memcpy(buf[0..3], "nsh"); return buf[0..3]; }
+    const pn = nstd.read(@intCast(pfd), &pbuf);
+    nstd.close(@intCast(pfd));
+    var it = std.mem.tokenizeScalar(u8, pbuf[0..pn], '\n');
+    while (it.next()) |line| {
+        var fields: [7][]const u8 = .{""} ** 7;
+        var fi: usize = 0;
+        var fit = std.mem.tokenizeScalar(u8, line, ':');
+        while (fit.next()) |f| : (fi += 1) { if (fi < 7) fields[fi] = f; }
+        if (fi < 7) continue;
+        var v: u32 = 0;
+        var bad = false;
+        for (fields[2]) |c| {
+            if (c < '0' or c > '9') { bad = true; break; }
+            v = v * 10 + (c - '0');
+        }
+        if (bad or v != uid) continue;
+        const shell = fields[6];
+        const disp = if (std.mem.startsWith(u8, shell, "/bin/")) shell[5..] else shell;
+        const l = @min(disp.len, buf.len);
+        @memcpy(buf[0..l], disp[0..l]);
+        return buf[0..l];
+    }
+    @memcpy(buf[0..3], "nsh"); return buf[0..3];
+}
+
+/// Read CPU brand string via CPUID leaves 0x80000002–4 (unprivileged in ring 3).
+fn nfCpuBrand(buf: []u8) []const u8 {
+    var out_len: usize = 0;
+    var leaf: u32 = 0x8000_0002;
+    while (leaf <= 0x8000_0004) : (leaf += 1) {
+        var eax: u32 = undefined;
+        var ebx: u32 = undefined;
+        var ecx: u32 = undefined;
+        var edx: u32 = undefined;
+        asm volatile ("cpuid"
+            : [a] "={eax}" (eax),
+              [b] "={ebx}" (ebx),
+              [c] "={ecx}" (ecx),
+              [d] "={edx}" (edx),
+            : [leaf] "{eax}" (leaf),
+            : .{ .ebx = true }
+        );
+        const regs = [4]u32{ eax, ebx, ecx, edx };
+        for (regs) |r| {
+            var k: u5 = 0;
+            while (k < 4) : (k += 1) {
+                const ch: u8 = @truncate(r >> (@as(u5, k) * 8));
+                if (out_len < buf.len - 1) { buf[out_len] = ch; out_len += 1; }
+            }
+        }
+    }
+    var start: usize = 0;
+    while (start < out_len and buf[start] == ' ') start += 1;
+    var end = out_len;
+    while (end > start and (buf[end - 1] == 0 or buf[end - 1] == ' ')) end -= 1;
+    if (end <= start) { @memcpy(buf[0..6], "x86_64"); return buf[0..6]; }
+    if (start > 0) {
+        var i: usize = 0;
+        while (i < end - start) : (i += 1) buf[i] = buf[start + i];
+    }
+    return buf[0..end - start];
+}
+
 fn appletNevfetch() void {
-    // Each logo line is exactly 16 visible chars.
-    // The "N" letter drawn with two verticals and a diagonal.
-    const L0 = " |\\         |   ";  //  |\         |
-    const L1 = " | \\        |   ";  //  | \        |
-    const L2 = " |  \\       |   ";  //  |  \       |
-    const L3 = " |   \\      |   ";  //  |   \      |
-    const L4 = " |    \\     |   ";  //  |    \     |
-    const L5 = " |     \\    |   ";  //  |     \    |
-    const L6 = " |      \\   |   ";  //  |      \   |
-    const L7 = " |       \\  |   ";  //  |       \  |
-    const L8 = " |        \\ |   ";  //  |        \ |
-    const L9 = " |         \\|   ";  //  |         \|
-    const LB = "                ";  //  (blank)
+    const L0 = " |\\         |   ";
+    const L1 = " | \\        |   ";
+    const L2 = " |  \\       |   ";
+    const L3 = " |   \\      |   ";
+    const L4 = " |    \\     |   ";
+    const L5 = " |     \\    |   ";
+    const L6 = " |      \\   |   ";
+    const L7 = " |       \\  |   ";
+    const L8 = " |        \\ |   ";
+    const L9 = " |         \\|   ";
+    const LB = "                ";
+
+    // --- real data ---
+    var ubuf_name: [32]u8 = undefined;
+    const username = nfGetUser(&ubuf_name);
+
+    var hbuf: [64]u8 = undefined;
+    const hostname = nfReadFile("/etc/hostname", &hbuf);
 
     var ubuf: [16]u8 = undefined;
     const ustr = nfFmtUptime(&ubuf);
 
+    var shbuf: [64]u8 = undefined;
+    const shell = nfGetShell(&shbuf);
+
+    var cpubuf: [64]u8 = undefined;
+    const cpu = nfCpuBrand(&cpubuf);
+
+    var ipbuf: [32]u8 = undefined;
+    const ip_ok = nstd.netInfo(&ipbuf) == 0;
+    const ip_str: []const u8 = if (ip_ok) nstd.span(@as([*:0]const u8, @ptrCast(&ipbuf))) else "no network";
+
+    // header "user@host" and separator
+    var header: [96]u8 = undefined;
+    var hlen: usize = 0;
+    @memcpy(header[hlen..hlen + username.len], username); hlen += username.len;
+    header[hlen] = '@'; hlen += 1;
+    @memcpy(header[hlen..hlen + hostname.len], hostname); hlen += hostname.len;
+    var sep: [64]u8 = undefined;
+    for (0..@min(hlen, sep.len)) |i| sep[i] = '-';
+
     nstd.print("\n");
-    nfRow( L0, "\x1b[1mnevara\x1b[0m@\x1b[1mnevara\x1b[0m");
-    nfRow( L1, "----------------------");
-    nfLbl( L2, "OS:     ", "Nevara OS 0.1.0");
-    nfLbl( L3, "Kernel: ", "Nevara 0.1.0 x86_64");
-    nfLbl( L4, "Uptime: ", ustr);
-    nfLbl( L5, "Shell:  ", "nsh");
-    nfLbl( L6, "CPU:    ", "Intel x86_64");
-    nfLbl( L7, "Memory: ", "512 MiB");
-    nfLbl( L8, "Disk:   ", "ext4 /");
-    nfRow( L9, "");
-    nfRow( LB, "");
-    // 8 normal colours
+    // L0 with yellow bold "user@host"
+    nstd.print("\x1b[1;36m"); nstd.print(L0);
+    nstd.print("\x1b[0m  \x1b[1;33m");
+    _ = nstd.write(1, header[0..hlen]);
+    nstd.print("\x1b[0m\n");
+
+    nfRow(L1, sep[0..@min(hlen, sep.len)]);
+    nfLbl(L2, "OS:     ", "Nevara OS (Dev)");
+    nfLbl(L3, "Kernel: ", "Nevara Dev x86_64");
+    nfLbl(L4, "Uptime: ", ustr);
+    nfLbl(L5, "Shell:  ", shell);
+    nfLbl(L6, "CPU:    ", cpu);
+    nfLbl(L7, "Net:    ", ip_str);
+    nfLbl(L8, "Disk:   ", "ext4 /");
+    nfRow(L9, "");
+    nfRow(LB, "");
     nstd.print("  \x1b[40m   \x1b[41m   \x1b[42m   \x1b[43m   \x1b[44m   \x1b[45m   \x1b[46m   \x1b[47m   \x1b[0m\n");
-    // 8 bright colours
     nstd.print("  \x1b[100m   \x1b[101m   \x1b[102m   \x1b[103m   \x1b[104m   \x1b[105m   \x1b[106m   \x1b[107m   \x1b[0m\n");
     nstd.print("\n");
 }
@@ -2280,3 +2421,4 @@ fn appletIfconfig() void {
     nstd.print("  netmask 255.255.255.0\n");
     nstd.print("  gateway 10.0.2.2\n");
 }
+
