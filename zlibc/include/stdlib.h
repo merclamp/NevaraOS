@@ -14,8 +14,9 @@ void *realloc(void *ptr, size_t new_size);
 void  free(void *p);
 
 /* Process */
-void exit(int code);
-void abort(void);
+void exit(int code) __attribute__((noreturn));
+void abort(void) __attribute__((noreturn));
+int  atexit(void (*func)(void));
 
 /* Integer arithmetic */
 int  abs(int x);

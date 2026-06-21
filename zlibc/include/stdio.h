@@ -6,15 +6,29 @@
 #endif
 
 typedef unsigned long size_t;
+#ifndef __ssize_t_defined
+typedef long ssize_t;
+#define __ssize_t_defined
+#endif
 
-/* stdio uses FILE* only as fd-carrying pointers (1=stdout, 2=stderr). */
-typedef void FILE;
+
+/* stdio uses FILE* for fd-carrying pointers (1=stdout, 2=stderr) or fopen'd files. */
+typedef struct { int _fd; int _eof; } FILE;
+
 
 #define stdin  ((FILE *)0)
 #define stdout ((FILE *)1)
 #define stderr ((FILE *)2)
-
 #define EOF (-1)
+
+/* File open/close */
+FILE *fopen(const char *path, const char *mode);
+int   fclose(FILE *stream);
+
+/* Line I/O */
+char   *fgets(char *s, int size, FILE *stream);
+ssize_t getline(char **lineptr, size_t *n, FILE *stream);
+
 
 /* Character I/O */
 int putchar(int c);

@@ -4,20 +4,25 @@
 //! against a small, all-Zig libc — not to run prebuilt Linux binaries. It sits
 //! directly on the kernel syscall ABI; no external dependencies.
 
-const SYS_read:   usize = 0;
-const SYS_write:  usize = 1;
-const SYS_open:   usize = 2;
-const SYS_close:  usize = 3;
-const SYS_dup:    usize = 32;
-const SYS_dup2:   usize = 33;
-const SYS_getpid: usize = 39;
-const SYS_fork:   usize = 57;
-const SYS_execve: usize = 59;
-const SYS_exit:   usize = 60;
-const SYS_kill:   usize = 62;
-const SYS_brk:    usize = 12;
-const SYS_uptime: usize = 1001;
-const SYS_sleep:  usize = 1002;
+const SYS_read:      usize = 0;
+const SYS_write:     usize = 1;
+const SYS_open:      usize = 2;
+const SYS_close:     usize = 3;
+const SYS_fstat:     usize = 5;
+const SYS_lseek:     usize = 8;
+const SYS_dup:       usize = 32;
+const SYS_dup2:      usize = 33;
+const SYS_getpid:    usize = 39;
+const SYS_fork:      usize = 57;
+const SYS_execve:    usize = 59;
+const SYS_exit:      usize = 60;
+const SYS_kill:      usize = 62;
+const SYS_ftruncate: usize = 77;
+const SYS_brk:       usize = 12;
+const SYS_ioctl:     usize = 16;
+const SYS_uptime:    usize = 1001;
+const SYS_sleep:     usize = 1002;
+const SYS_tty_mode:  usize = 1020;
 
 inline fn syscall1(n: usize, a1: usize) usize {
     return asm volatile ("syscall"
@@ -905,7 +910,7 @@ export fn scanf(fmt: [*:0]const u8, ...) callconv(.c) c_int {
 // errno.h
 // ============================================================================
 
-pub var errno: c_int = 0;
+export var errno: c_int = 0;
 
 const errno_strings = [40][*:0]const u8{
     "Success",
@@ -1293,6 +1298,309 @@ export fn readlink(_path: [*:0]const u8, _buf: [*]u8, _bufsiz: usize) callconv(.
 }
 
 // ============================================================================
+// fcntl.h / sys/stat.h / sys/ioctl.h / termios.h / sys/time.h / sys/wait.h
+// ============================================================================
+
+const SYS_open_z:      usize = 2;
+const SYS_lseek_z:     usize = 8;
+const SYS_fstat_z:     usize = 5;
+const SYS_ftruncate_z: usize = 77;
+const SYS_mkdir_z:     usize = 83;
+const SYS_wait4_z:     usize = 61;
+const SYS_tty_mode_z:  usize = 1020;
+
+export fn open(path: [*:0]const u8, flags: c_int, ...) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall3(SYS_open_z, @intFromPtr(path), @intCast(flags), 0o644)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return @intCast(r);
+}
+
+export fn creat(path: [*:0]const u8, mode: c_int) callconv(.c) c_int {
+    _ = mode;
+    return open(path, 0o100 | 0o001 | 0o1000); // O_CREAT|O_WRONLY|O_TRUNC
+}
+
+export fn lseek(fd: c_int, offset: c_long, whence: c_int) callconv(.c) c_long {
+    const r = @as(isize, @bitCast(syscall3(SYS_lseek_z, @intCast(fd), @bitCast(offset), @intCast(whence))));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return @intCast(r);
+}
+
+export fn ftruncate(fd: c_int, length: c_long) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall3(SYS_ftruncate_z, @intCast(fd), @bitCast(length), 0)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+// Linux x86_64 stat structure (128 bytes)
+const LinuxStat = extern struct {
+    st_dev:     u64,
+    st_ino:     u64,
+    st_nlink:   u64,
+    st_mode:    u32,
+    st_uid:     u32,
+    st_gid:     u32,
+    _pad0:      i32,
+    st_rdev:    u64,
+    st_size:    i64,
+    st_blksize: i64,
+    st_blocks:  i64,
+    st_atime:   i64,
+    st_atime_ns:i64,
+    st_mtime:   i64,
+    st_mtime_ns:i64,
+    st_ctime:   i64,
+    st_ctime_ns:i64,
+    _unused:    [3]i64,
+};
+
+// Our C-facing stat struct (matches sys/stat.h)
+const CStat = extern struct {
+    st_dev:     u64,
+    st_ino:     u64,
+    st_mode:    u32,
+    st_nlink:   u32,
+    st_uid:     u32,
+    st_gid:     u32,
+    st_rdev:    u64,
+    st_size:    i64,
+    st_blksize: i64,
+    st_blocks:  i64,
+    st_atime:   i64,
+    st_mtime:   i64,
+    st_ctime:   i64,
+};
+
+export fn fstat(fd: c_int, buf: *CStat) callconv(.c) c_int {
+    var ls: LinuxStat = undefined;
+    const r = @as(isize, @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]   "{rax}" (SYS_fstat_z),
+          [a1]  "{rdi}" (@as(usize, @intCast(fd))),
+          [a2]  "{rsi}" (@intFromPtr(&ls)),
+        : .{ .rcx = true, .r11 = true, .memory = true })));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    buf.st_dev     = ls.st_dev;
+    buf.st_ino     = ls.st_ino;
+    buf.st_mode    = ls.st_mode;
+    buf.st_nlink   = @intCast(ls.st_nlink);
+    buf.st_uid     = ls.st_uid;
+    buf.st_gid     = ls.st_gid;
+    buf.st_rdev    = ls.st_rdev;
+    buf.st_size    = ls.st_size;
+    buf.st_blksize = ls.st_blksize;
+    buf.st_blocks  = ls.st_blocks;
+    buf.st_atime   = ls.st_atime;
+    buf.st_mtime   = ls.st_mtime;
+    buf.st_ctime   = ls.st_ctime;
+    return 0;
+}
+
+export fn stat(path: [*:0]const u8, buf: *CStat) callconv(.c) c_int {
+    // Open + fstat + close
+    const fd = open(path, 0); // O_RDONLY
+    if (fd < 0) return -1;
+    const r = fstat(fd, buf);
+    _ = syscall1(3, @intCast(fd)); // close
+    return r;
+}
+
+export fn mkdir_c(path: [*:0]const u8, mode: c_uint) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall3(SYS_mkdir_z, @intFromPtr(path), @intCast(mode), 0)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+// ioctl: TIOCGWINSZ returns 100x75 (800x600 / 8px font)
+export fn ioctl(fd: c_int, request: c_ulong, ...) callconv(.c) c_int {
+    _ = fd;
+    if (request == 0x5413) { // TIOCGWINSZ
+        var ap = @cVaStart();
+        defer @cVaEnd(&ap);
+        const ws = @cVaArg(&ap, *anyopaque);
+        const p: [*]u16 = @ptrCast(@alignCast(ws));
+        p[0] = 75;  // ws_row
+        p[1] = 100; // ws_col
+        p[2] = 0;
+        p[3] = 0;
+        return 0;
+    }
+    // All other ioctls fail silently
+    return -1;
+}
+
+// termios: backed by SYS_tty_mode
+// struct termios layout (Linux x86_64):
+//   c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_line(1) c_cc[32](32) ...
+// c_lflag is at byte offset 12.
+var g_raw_mode: bool = false;
+var g_orig_termios: [60]u8 = [1]u8{0} ** 60; // saved termios bytes (opaque)
+
+export fn tcgetattr(fd: c_int, t: *anyopaque) callconv(.c) c_int {
+    _ = fd;
+    // Return a synthetic termios with ICANON|ECHO set (cooked mode)
+    const p: [*]u8 = @ptrCast(t);
+    @memset(p[0..60], 0);
+    // c_lflag at offset 12: set ICANON(0o002)|ECHO(0o010)|ISIG(0o001)
+    const lflag: *u32 = @ptrCast(@alignCast(p + 12));
+    lflag.* = 0o000002 | 0o000010 | 0o000001; // ICANON|ECHO|ISIG
+    // c_cc[VMIN]=1, c_cc[VTIME]=0 (at c_cc = offset 17, VMIN=6, VTIME=5)
+    p[17 + 6] = 1; // VMIN
+    p[17 + 5] = 0; // VTIME
+    @memcpy(g_orig_termios[0..60], p[0..60]);
+    return 0;
+}
+
+export fn tcsetattr(fd: c_int, action: c_int, t: *const anyopaque) callconv(.c) c_int {
+    _ = fd; _ = action;
+    const p: [*]const u8 = @ptrCast(t);
+    const lflag: *const u32 = @ptrCast(@alignCast(p + 12));
+    // If ICANON is cleared -> raw mode
+    const want_raw = (lflag.* & 0o000002) == 0;
+    if (want_raw != g_raw_mode) {
+        _ = syscall1(SYS_tty_mode_z, if (want_raw) 1 else 0);
+        g_raw_mode = want_raw;
+    }
+    return 0;
+}
+
+export fn gettimeofday(tv: ?*anyopaque, tz: ?*anyopaque) callconv(.c) c_int {
+    _ = tz;
+    if (tv) |p| {
+        const t: *[2]c_long = @ptrCast(@alignCast(p));
+        const ticks = syscall1(SYS_uptime, 0);
+        t[0] = @intCast(ticks / 100);
+        t[1] = @intCast((ticks % 100) * 10000);
+    }
+    return 0;
+}
+
+export fn waitpid(pid: c_int, status: ?*c_int, options: c_int) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n]   "{rax}" (SYS_wait4_z),
+          [a1]  "{rdi}" (@as(usize, @bitCast(@as(isize, pid)))),
+          [a2]  "{rsi}" (@intFromPtr(if (status) |s| s else @as(?*c_int, null))),
+          [a3]  "{rdx}" (@as(usize, @intCast(options))),
+        : .{ .rcx = true, .r11 = true, .memory = true })));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return @intCast(r);
+}
+
+export fn wait(status: ?*c_int) callconv(.c) c_int {
+    return waitpid(-1, status, 0);
+}
+
+// ============================================================================
+// atexit / FILE* I/O (fopen, fclose, getline, fwrite, fread, feof, ferror)
+// ============================================================================
+
+// atexit — simple fixed-size handler table
+const ATEXIT_MAX = 32;
+var atexit_handlers: [ATEXIT_MAX]?*const fn() callconv(.c) void = [1]?*const fn() callconv(.c) void{null} ** ATEXIT_MAX;
+var atexit_count: usize = 0;
+
+export fn atexit(handler: *const fn() callconv(.c) void) callconv(.c) c_int {
+    if (atexit_count >= ATEXIT_MAX) return -1;
+    atexit_handlers[atexit_count] = handler;
+    atexit_count += 1;
+    return 0;
+}
+
+// FILE* backed by a plain file descriptor.
+// We represent FILE* as (fd + 1) cast to *anyopaque so fd=0 → ptr=1 (non-null).
+// Negative fd values are used for error state.
+
+fn fdToFILE(fd: c_int) ?*anyopaque {
+    if (fd < 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(fd)) + 1);
+}
+fn FILEtoFd(f: *anyopaque) c_int {
+    const v: usize = @intFromPtr(f);
+    if (v == 0) return -1;
+    return @intCast(v - 1);
+}
+
+export fn fopen(path: [*:0]const u8, mode: [*:0]const u8) callconv(.c) ?*anyopaque {
+    const flags: c_int = if (mode[0] == 'w') 0o100 | 0o001 | 0o1000  // O_CREAT|O_WRONLY|O_TRUNC
+                         else if (mode[0] == 'a') 0o100 | 0o001 | 0o2000  // O_CREAT|O_WRONLY|O_APPEND
+                         else 0; // O_RDONLY
+    const fd = open(path, flags);
+    return fdToFILE(fd);
+}
+
+export fn fclose(f: ?*anyopaque) callconv(.c) c_int {
+    if (f == null) return -1;
+    const fd = FILEtoFd(f.?);
+    return close(fd);
+}
+
+export fn fread(buf: [*]u8, size: usize, nmemb: usize, f: ?*anyopaque) callconv(.c) usize {
+    if (f == null) return 0;
+    const fd = FILEtoFd(f.?);
+    const n = @as(isize, @bitCast(syscall3(SYS_read, @intCast(fd), @intFromPtr(buf), size * nmemb)));
+    if (n <= 0) return 0;
+    return @intCast(@divTrunc(n, @as(isize, @intCast(size))));
+}
+
+
+export fn fwrite(buf: [*]const u8, size: usize, nmemb: usize, f: ?*anyopaque) callconv(.c) usize {
+    if (f == null) return 0;
+    const fd = FILEtoFd(f.?);
+    // stdout/stderr are fd 1/2 from our stdio stubs
+    const actual_fd: usize = if (@intFromPtr(f) == 1) 1
+                             else if (@intFromPtr(f) == 2) 2
+                             else @intCast(fd);
+    const n = @as(isize, @bitCast(syscall3(SYS_write, actual_fd, @intFromPtr(buf), size * nmemb)));
+    if (n <= 0) return 0;
+    return @intCast(@divTrunc(n, @as(isize, @intCast(size))));
+}
+
+export fn feof(f: ?*anyopaque) callconv(.c) c_int {
+    _ = f;
+    return 0; // simplified: let read return 0 for EOF
+}
+
+export fn ferror(f: ?*anyopaque) callconv(.c) c_int {
+    _ = f;
+    return 0;
+}
+
+// getline: read a line from FILE*, growing *lineptr as needed.
+// Returns number of bytes read (including '\n'), or -1 on EOF/error.
+export fn getline(lineptr: *?[*:0]u8, n: *usize, f: ?*anyopaque) callconv(.c) isize {
+    if (f == null) return -1;
+    const fd = FILEtoFd(f.?);
+    var buf: [1]u8 = undefined;
+    var total: usize = 0;
+    var capacity = n.*;
+    var ptr = lineptr.*;
+
+    while (true) {
+        const r = @as(isize, @bitCast(syscall3(SYS_read, @intCast(fd), @intFromPtr(&buf), 1)));
+        if (r <= 0) {
+            if (total == 0) return -1;
+            break;
+        }
+        // Grow buffer if needed (total + 2: char + null)
+        if (ptr == null or total + 2 > capacity) {
+            const new_cap = if (capacity < 64) 128 else capacity * 2;
+            const new_ptr: ?*anyopaque = realloc(if (ptr) |p| @ptrCast(p) else null, new_cap);
+            if (new_ptr == null) return -1;
+            ptr = @ptrCast(new_ptr);
+            capacity = new_cap;
+        }
+        ptr.?[total] = buf[0];
+        total += 1;
+        if (buf[0] == '\n') break;
+    }
+    if (ptr != null) ptr.?[total] = 0;
+    lineptr.* = ptr;
+    n.* = capacity;
+    return @intCast(total);
+}
+
+// ============================================================================
 // crt0
 // ============================================================================
 
@@ -1300,5 +1608,11 @@ extern fn main() c_int;
 
 export fn _start() callconv(.c) noreturn {
     const ret = main();
+    // Run atexit handlers in reverse order.
+    var i = atexit_count;
+    while (i > 0) {
+        i -= 1;
+        if (atexit_handlers[i]) |h| h();
+    }
     exit(ret);
 }

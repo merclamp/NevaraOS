@@ -153,7 +153,29 @@ pub fn build(b: *std.Build) void {
     const hello_elf = c_link.addOutputFileArg("hello.elf");
     c_link.addFileArg(hello_o);
     c_link.addFileArg(zlibc_obj.getEmittedBin());
-    // Compile the kernel (Zig + assembly) into a single relocatable object.
+
+    // Compile nved.c (kilo editor) — same pattern as hello.c
+    const nved_cc = b.addSystemCommand(&.{ b.graph.zig_exe, "cc" });
+    nved_cc.addArgs(&.{
+        "-target",        "x86_64-freestanding",
+        "-ffreestanding", "-nostdlib",
+        "-nostdinc",      "-fno-stack-protector",
+        "-mcmodel=large", "-O2",
+        "-Wno-implicit-function-declaration",
+        "-Wno-int-conversion",
+        "-c",
+    });
+    nved_cc.addPrefixedDirectoryArg("-I", b.path("zlibc/include"));
+    nved_cc.addFileArg(b.path("user/nved/nved.c"));
+    nved_cc.addArg("-o");
+    const nved_o = nved_cc.addOutputFileArg("nved.o");
+
+    const nved_link = b.addSystemCommand(&.{ "ld.lld", "-m", "elf_x86_64", "-nostdlib", "-no-pie", "-z", "noexecstack", "-T" });
+    nved_link.addFileArg(b.path("user/linker.ld"));
+    nved_link.addArg("-o");
+    const nved_elf = nved_link.addOutputFileArg("nved.elf");
+    nved_link.addFileArg(nved_o);
+    nved_link.addFileArg(zlibc_obj.getEmittedBin());
     // We do NOT let Zig do the final link:
     //   * Zig's `-flld` path SEGVs on this freestanding target (0.16 bug),
     //   * Zig's self-hosted linker ignores the linker script's SECTIONS, which
@@ -205,8 +227,8 @@ pub fn build(b: *std.Build) void {
     // Step 1: assemble the rootfs staging directory and create the ext4 image.
     // We pass ELF paths as explicit arguments so Zig can track their changes.
     const mkrootfs = b.addSystemCommand(&.{ "sh", "-c",
-        // $1=zinit $2=nsh $3=nevbox $4=hello $5=init $6=output_img
-        \\ZINIT="$1" NSH="$2" NEVBOX="$3" HELLO="$4" INIT="$5" OUT="$6"
+        // $1=zinit $2=nsh $3=nevbox $4=hello $5=init $6=nved $7=output_img
+        \\ZINIT="$1" NSH="$2" NEVBOX="$3" HELLO="$4" INIT="$5" NVED="$6" OUT="$7"
         \\ROOTFS="$(dirname "$OUT")/rootfsdir"
         \\rm -rf "$ROOTFS"
         \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/tmp" "$ROOTFS/mnt" \
@@ -217,6 +239,7 @@ pub fn build(b: *std.Build) void {
         \\cp "$NEVBOX" "$ROOTFS/bin/nevbox"
         \\cp "$HELLO"  "$ROOTFS/bin/hello"
         \\cp "$INIT"   "$ROOTFS/bin/init"
+        \\cp "$NVED"   "$ROOTFS/bin/nved"
         \\for APP in echo cat ls mkfile mkdir wc grep head tail cp touch seq tee \
         \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
         \\           yes basename dirname rm mv sleep chmod \
@@ -246,6 +269,7 @@ pub fn build(b: *std.Build) void {
     mkrootfs.addFileArg(nevbox_elf);
     mkrootfs.addFileArg(hello_elf);
     mkrootfs.addFileArg(user_elf);
+    mkrootfs.addFileArg(nved_elf);
     const rootfs_img = mkrootfs.addOutputFileArg("rootfs.ext4");
 
     // ---- Bootable ISO via grub-mkrescue --------------------------------
