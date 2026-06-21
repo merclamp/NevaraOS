@@ -43,8 +43,9 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 - Boots on standard PCs via GRUB from a **single ISO image** that contains
   both the kernel and the root filesystem (`rootfs.ext4` embedded inside).
   No separate disk images needed to distribute or boot.
-- Its own framebuffer terminal (1024×768) with ANSI colours, a block cursor, and
+- Its own framebuffer terminal (800×600) with ANSI colours, a block cursor, and
   Linux-style line editing — arrow keys, history, and the usual Ctrl shortcuts.
+
 - A clean, modular kernel where every piece is meant to be understandable.
 - Runs real ring-3 programs from a built-in ELF loader, including an init
   system (**ZInit**), a multi-call coreutils binary (**NevBox**), and its own
@@ -268,14 +269,15 @@ With TCP in place, build the first services:
 After the server stack is stable and tested, bring up a graphical environment:
 
 - ⏳ **Framebuffer compositor** — a minimal window manager that blits rectangular
-  windows onto the 1024×768 framebuffer; double-buffered to avoid tearing.
+  windows onto the 800×600 framebuffer; double-buffered to avoid tearing.
 - ⏳ **PS/2 mouse driver** — extend `kbd.zig` to handle IRQ12 (PS/2 auxiliary
+
   port); decode X/Y delta + buttons; route to the compositor.
 - ⏳ **Window protocol** — a simple message queue (shared-memory ring or pipe)
   between apps and the compositor: `WM_CREATE_WINDOW`, `WM_DRAW_RECT`,
   `WM_KEY_EVENT`, `WM_MOUSE_EVENT`.
 - ⏳ **Terminal emulator** — a graphical window that embeds nsh; renders text
-  with the existing 8×8 bitmap font; supports ANSI/VT100 codes.
+  with the existing 8×8 bitmap font (16×16 px at 2× scale); supports ANSI/VT100 codes.
 - ⏳ **File manager** — a two-pane file browser (à la Midnight Commander) drawn
   in the framebuffer; uses `getdents64` for directory listing.
 - ⏳ **Application launcher** — a status bar with a clock (from `pit.jiffies`),
@@ -346,11 +348,12 @@ linked in. The `zig build iso` step:
 4. Packs kernel + rootfs + GRUB config into a single ISO via `grub-mkrescue`.
 5. Copies `rootfs.ext4` to `zig-out/` alongside the ISO for convenient QEMU use.
 
-**Display.** The kernel requests a linear RGB framebuffer (1024×768×32) via the
+**Display.** The kernel requests a linear RGB framebuffer (800×600×32) via the
 Multiboot2 header and drives it as a small ANSI/VT100 terminal: a colour cell
-grid rendered with a public-domain 8×8 bitmap font, a block cursor, and a CSI
-escape parser (cursor movement, line/screen erase, and SGR 16-colour
-attributes). All output is mirrored to the serial port (COM1) for debugging.
+grid rendered with a public-domain 8×8 bitmap font scaled 2× to 16×16 px (50 columns
+× 37 rows at 800×600), a block cursor, and a CSI escape parser (cursor movement,
+line/screen erase, and SGR 16-colour attributes). All output is mirrored to the
+serial port (COM1) for debugging.
 
 **Memory management.**
 
