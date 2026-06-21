@@ -140,6 +140,37 @@ pub fn free(phys: usize) void {
     if (frame < next_hint) next_hint = frame;
 }
 
+/// Allocate `n_pages` contiguous physical frames all below 4 GiB (DMA-safe).
+/// The frames are identity-mapped (phys == virt) so the returned address can
+/// be passed directly to 32-bit PCI DMA registers.
+/// Returns the base physical/virtual address, or null if OOM.
+pub fn allocLow32(n_pages: usize) ?usize {
+    const MAX_FRAME_4G: usize = 0x1_0000_0000 / PAGE_SIZE; // 1 M frames
+    const limit = @min(total_frames, MAX_FRAME_4G);
+    var f: usize = 0x100; // start after low 1 MiB
+    while (f + n_pages <= limit) : (f += 1) {
+        // Check that all n_pages frames starting at f are free.
+        var ok = true;
+        var k: usize = 0;
+        while (k < n_pages) : (k += 1) {
+            if (testFrame(f + k)) { ok = false; break; }
+        }
+        if (!ok) continue;
+        // Mark them all used.
+        k = 0;
+        while (k < n_pages) : (k += 1) markUsed(f + k);
+        return f * PAGE_SIZE;
+    }
+    return null;
+}
+
+/// Free `n_pages` contiguous frames starting at physical address `phys`.
+pub fn freePages(phys: usize, n_pages: usize) void {
+    const base = phys / PAGE_SIZE;
+    var k: usize = 0;
+    while (k < n_pages) : (k += 1) markFree(base + k);
+}
+
 pub fn freeFrames() usize {
     return total_frames - used_frames;
 }
