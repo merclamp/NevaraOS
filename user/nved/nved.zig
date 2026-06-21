@@ -240,8 +240,9 @@ fn obFlush() void {
 
 fn clearScreen() void { obStr("\x1b[2J"); }
 fn moveCursor(row: usize, col: usize) void { obFmt("\x1b[{d};{d}H", .{ row + 1, col + 1 }); }
-fn hideCursor() void { obStr("\x1b[?25l"); }
-fn showCursor() void { obStr("\x1b[?25h"); }
+fn hideCursor() void {}  // fbterm ignores cursor visibility sequences
+fn showCursor() void {}
+
 fn invertVideo() void { obStr("\x1b[7m"); }
 fn normalVideo() void { obStr("\x1b[0m"); }
 fn eraseToEol() void { obStr("\x1b[K"); }
@@ -407,7 +408,8 @@ const Key = enum(u16) {
     ctrl_s   = 19,
     ctrl_q   = 17,
     ctrl_g   = 7,
-    backspace = 127,
+    backspace = 8,   // PS/2 kbd sends ASCII 8 (not 127) for Backspace key
+
     enter    = 13,
     tab      = 9,
     _,
@@ -416,8 +418,9 @@ const Key = enum(u16) {
 fn readKey() Key {
     while (true) {
         const c = rawRead1() orelse continue;
+        // Both 8 (BS) and 127 (DEL-as-backspace) treated as backspace.
+        if (c == 127) return .backspace;
         if (c == 0x1b) {
-            // ESC sequence
             const c2 = rawRead1() orelse return @enumFromInt(0);
             if (c2 != '[') return @enumFromInt(0);
             const c3 = rawRead1() orelse return @enumFromInt(0);
