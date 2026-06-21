@@ -55,13 +55,14 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   (`nevara:/etc$`).
 - **ext4 as the primary read-write filesystem** — the root filesystem is a real
   ext4 volume mounted at `/`: files and directories created in the shell persist
-  across reboots. The driver supports extent trees, block/inode allocation, and
-  directory entry management — no journal, no checksums (matching the mke2fs
-  flags used to build the image).
+  across reboots. The driver supports extent trees (depth-0 and depth-1 for
+  files beyond ~4 MiB), block/inode allocation, directory entry management,
+  inode timestamps, and file-permission bits with `chmod` — no journal, no
+  checksums (matching the mke2fs flags used to build the image).
 - **30+ NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
   `mv` `rm` `touch` `mkfile` `mkdir` `sort` `uniq` `cut` `tr` `rev` `pwd`
   `yes` `basename` `dirname` `seq` `tee` `true` `false` `sleep` `uptime`
-  `uname` `nevfetch` — all in one multi-call binary, no libc.
+  `uname` `nevfetch` `chmod` — all in one multi-call binary, no libc.
 
 ## Current status
 
@@ -93,10 +94,12 @@ Twelve foundational stages are done and verified in QEMU:
 - ✅ **ext4 read-write root filesystem** — the kernel mounts a real ext4 volume
   as `/` on ATA primary master. Full read-write: files and directories created
   from the shell (`mkfile`, `mkdir`) are persisted to the disk image across
-  reboots. The driver handles extent trees (in-inode depth-0), block and inode
-  bitmaps, GDT/superblock free-count tracking, directory entry creation and
-  removal, sparse-block holes, and `rename`. The ISO ships a pre-populated
-  rootfs image with `/bin`, `/etc`, `/tmp`, `/mnt` and all userland binaries.
+  reboots. The driver handles extent trees (depth-0 in-inode and depth-1 index
+  nodes for files beyond ~4 MiB), block and inode bitmaps, GDT/superblock
+  free-count tracking, directory entry creation and removal, sparse-block holes,
+  `rename`, inode timestamps (atime/mtime/ctime), and file permission bits
+  (`chmod`). The ISO ships a pre-populated rootfs image with `/bin`, `/etc`,
+  `/tmp`, `/mnt` and all userland binaries.
 - ✅ **Single-ISO distribution** — `zig build iso` produces one self-contained
   `nevara.iso` with the kernel at `/boot/kernel` and the ext4 rootfs at
   `/boot/rootfs.ext4`. Booting only requires this ISO plus the rootfs image as
@@ -117,8 +120,9 @@ Twelve foundational stages are done and verified in QEMU:
 
 What still needs to be built (roughly in order):
 
-- ⏳ **ext4 write hardening** — handle files larger than ~4 MiB (multi-level
-  extent trees), timestamps, proper inode mode bits, `chmod`.
+- ✅ **ext4 write hardening** — large files (depth-1 extent index nodes for
+  files beyond ~4 MiB), inode timestamps (atime/mtime/ctime from PIT jiffies),
+  and file-permission bits with `chmod` (syscall 90, NevBox applet).
 - ⏳ **More userland** — additional NevBox applets (`find`, …),
   a richer ZLibc (`printf`, `scanf`, …).
 - ⏳ **Polish** — networking, users & permissions, a package manager, and more.
@@ -223,16 +227,18 @@ The **ext4 driver** (`ext4.zig`) supports:
 - *Read:* superblock, GDT (cached in RAM), inodes, extent trees (depth 0–2),
   linear directory entries, sparse holes.
 - *Write:* block/inode allocation from bitmaps with GDT and superblock
-  free-count updates; in-inode flat extent trees (depth 0, up to 4 extents,
-  with run-length merging); full file overwrite (`writeFile`); directory entry
+  free-count updates; extent trees up to depth-1 (in-inode index node → leaf
+  blocks on disk, supports files well beyond 100 MiB at 1 KiB block size, with
+  run-length merging); full file overwrite (`writeFile`); directory entry
   insertion (slack-space reuse + new block allocation) and removal; `createFile`,
   `createDir` (with `.` and `..`), `unlinkFile` (free blocks + free inode),
-  `renameEntry`.
+  `renameEntry`; inode timestamps on create/write/chmod; `chmod`/`getMode`.
 
 On top sits a per-process file-descriptor table and a dispatcher keyed by the
 Linux x86_64 syscall numbers (read, write, open, close, lseek, getpid, brk,
 fork, execve, exit, wait4, mkdir, pipe, dup2, getdents64, chdir=80, getcwd=79,
-spawn=1000, uptime=1001, unlink=87, rename=82, sleep=1002, rmdir=84), returning
+spawn=1000, uptime=1001, unlink=87, rename=82, sleep=1002, rmdir=84,
+chmod=90), returning
 negative errno on failure. All path-taking syscalls resolve relative paths
 against the current process's cwd via an internal `toAbsPath` helper.
 
