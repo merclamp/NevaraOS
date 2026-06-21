@@ -1601,6 +1601,250 @@ export fn getline(lineptr: *?[*:0]u8, n: *usize, f: ?*anyopaque) callconv(.c) is
 }
 
 // ============================================================================
+// assert.h / strings.h extras / sys/stat.h extras / unistd.h extras
+// ============================================================================
+
+const SYS_chmod_z:  usize = 90;
+const SYS_unlink_z: usize = 87;
+const SYS_rename_z: usize = 82;
+
+export fn __assert_fail(expr: [*:0]const u8, file: [*:0]const u8, line: c_int) callconv(.c) noreturn {
+    const msg1: []const u8 = "assertion failed: ";
+    const msg2: []const u8 = " at ";
+    const msg3: []const u8 = ":";
+    const nl:   []const u8 = "\n";
+    _ = syscall3(SYS_write, 2, @intFromPtr(msg1.ptr), msg1.len);
+    _ = syscall3(SYS_write, 2, @intFromPtr(expr), strlen(expr));
+    _ = syscall3(SYS_write, 2, @intFromPtr(msg2.ptr), msg2.len);
+    _ = syscall3(SYS_write, 2, @intFromPtr(file), strlen(file));
+    _ = syscall3(SYS_write, 2, @intFromPtr(msg3.ptr), msg3.len);
+    var linebuf: [12]u8 = undefined;
+    var n: usize = 0;
+    var v: c_int = line;
+    if (v <= 0) { linebuf[0] = '0'; n = 1; } else {
+        var tmp: [12]u8 = undefined;
+        var k: usize = 0;
+        while (v > 0) : (v = @divTrunc(v, 10)) { tmp[k] = '0' + @as(u8, @intCast(@rem(v, 10))); k += 1; }
+        while (k > 0) { k -= 1; linebuf[n] = tmp[k]; n += 1; }
+    }
+    _ = syscall3(SYS_write, 2, @intFromPtr(&linebuf), n);
+    _ = syscall3(SYS_write, 2, @intFromPtr(nl.ptr), nl.len);
+    _ = syscall1(SYS_exit, 1);
+    unreachable;
+}
+
+// strings.h
+export fn bzero(s: [*]u8, n: usize) callconv(.c) void {
+    @memset(s[0..n], 0);
+}
+export fn bcopy(src: [*]const u8, dst: [*]u8, n: usize) callconv(.c) void {
+    _ = memmove(dst, src, n);
+}
+export fn bcmp(a: [*]const u8, b: [*]const u8, n: usize) callconv(.c) c_int {
+    return memcmp(a, b, n);
+}
+
+// sys/stat.h
+export fn chmod(path: [*:0]const u8, mode: c_uint) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall3(SYS_chmod_z, @intFromPtr(path), @intCast(mode), 0)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+// unistd.h extras
+export fn unlink(path: [*:0]const u8) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall1(SYS_unlink_z, @intFromPtr(path))));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+export fn rename(oldpath: [*:0]const u8, newpath: [*:0]const u8) callconv(.c) c_int {
+    const r = @as(isize, @bitCast(syscall3(SYS_rename_z, @intFromPtr(oldpath), @intFromPtr(newpath), 0)));
+    if (r < 0) { errno = @intCast(-r); return -1; }
+    return 0;
+}
+
+// ============================================================================
+// fdopen / strtoull / fseek / ftell / fileno / tmpfile stubs
+// ============================================================================
+
+// fdopen: wrap an fd into a FILE* using our fd→ptr encoding
+export fn fdopen(fd: c_int, _mode: [*:0]const u8) callconv(.c) ?*anyopaque {
+    _ = _mode;
+    if (fd < 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(fd)) + 1);
+}
+
+// strtoull — unsigned long long version of strtoul
+export fn strtoull(s: [*:0]const u8, endptr: ?*?[*:0]u8, base: c_int) callconv(.c) c_ulonglong {
+    return @intCast(strtoul(s, endptr, base));
+}
+
+// fseek / ftell using lseek
+export fn fseek(f: ?*anyopaque, offset: c_long, whence: c_int) callconv(.c) c_int {
+    if (f == null) return -1;
+    const fd_val: usize = @intFromPtr(f);
+    const fd: c_int = if (fd_val == 1 or fd_val == 2) @intCast(fd_val - 1)
+                      else @intCast(fd_val - 1);
+    const r = lseek(fd, offset, whence);
+    return if (r < 0) -1 else 0;
+}
+
+export fn ftell(f: ?*anyopaque) callconv(.c) c_long {
+    if (f == null) return -1;
+    const fd: c_int = @intCast(@intFromPtr(f) - 1);
+    return lseek(fd, 0, 1); // SEEK_CUR=1
+}
+
+export fn fileno(f: ?*anyopaque) callconv(.c) c_int {
+    if (f == null) return -1;
+    return @intCast(@intFromPtr(f) - 1);
+}
+
+// rewind: seek to start
+export fn rewind(f: ?*anyopaque) callconv(.c) void {
+    _ = fseek(f, 0, 0);
+}
+
+// tmpfile stub — returns null (not supported)
+export fn tmpfile() callconv(.c) ?*anyopaque {
+    return null;
+}
+
+// ============================================================================
+// remove, execvp, strtod/strtof/strtold, qsort, ldexp
+// ============================================================================
+
+export fn remove(path: [*:0]const u8) callconv(.c) c_int {
+    const r = unlink(path);
+    if (r == 0) return 0;
+    const r2 = @as(isize, @bitCast(syscall1(84, @intFromPtr(path)))); // SYS_rmdir
+    if (r2 < 0) { errno = @intCast(-r2); return -1; }
+    return 0;
+}
+
+export fn execvp(file: [*:0]const u8, argv: [*]const ?[*:0]const u8) callconv(.c) c_int {
+    return execve(file, argv, @ptrCast(&g_null_env));
+}
+
+// strtod: parse decimal float → IEEE 754 double via bit manipulation
+// Returns the bit pattern of the result as u64, cast to f64.
+// No soft-float ops used — all arithmetic is integer.
+export fn strtod(s: [*:0]const u8, endptr: ?*?[*:0]u8) callconv(.c) f64 {
+    var i: usize = 0;
+    while (s[i] == ' ' or s[i] == '\t') i += 1;
+    const neg = s[i] == '-';
+    if (neg or s[i] == '+') i += 1;
+    // Parse significant digits as integer
+    var sig: u64 = 0;
+    var sig_digits: i32 = 0;
+    var dec_point: i32 = -1; // position of decimal point
+    while (true) {
+        if (s[i] >= '0' and s[i] <= '9') {
+            if (sig_digits < 18) { sig = sig * 10 + @as(u64, s[i] - '0'); sig_digits += 1; }
+            if (dec_point >= 0) dec_point += 1;
+            i += 1;
+        } else if (s[i] == '.' and dec_point < 0) {
+            dec_point = 0; i += 1;
+        } else break;
+    }
+    // Decimal exponent
+    var exp10: i32 = 0;
+    if (s[i] == 'e' or s[i] == 'E') {
+        i += 1;
+        const eneg = s[i] == '-';
+        if (eneg or s[i] == '+') i += 1;
+        while (s[i] >= '0' and s[i] <= '9') : (i += 1) exp10 = exp10 * 10 + @as(i32, s[i] - '0');
+        if (eneg) exp10 = -exp10;
+    }
+    if (dec_point > 0) exp10 -= dec_point;
+    if (endptr) |p| p.* = @constCast(s + i);
+    if (sig == 0) return 0;
+    // sig * 10^exp10: convert to IEEE 754 double using integer math only.
+    // We scale sig to fit in 53 bits, tracking binary exponent.
+    var mantissa: u64 = sig;
+    var bin_exp: i32 = 0;
+    // Normalize mantissa to 53-bit range [2^52, 2^53)
+    while (mantissa >= (1 << 53)) { mantissa >>= 1; bin_exp += 1; }
+    while (mantissa < (1 << 52) and mantissa > 0) { mantissa <<= 1; bin_exp -= 1; }
+    // Apply decimal exponent via multiply/divide by powers of 10
+    // Use scaled integer: multiply by 5^|exp10| and adjust bin_exp by exp10
+    var e = exp10;
+    if (e > 0) {
+        while (e > 0 and mantissa < (1 << 52)) { mantissa *%= 5; bin_exp += 1; e -= 1; }
+        bin_exp += e; // remaining powers of 2 from 10^e = 2^e * 5^e
+    } else {
+        while (e < 0) { mantissa = @divTrunc(mantissa, 5); bin_exp -= 1; e += 1; }
+        bin_exp += e;
+    }
+    // Re-normalize
+    while (mantissa >= (1 << 53)) { mantissa >>= 1; bin_exp += 1; }
+    while (mantissa > 0 and mantissa < (1 << 52)) { mantissa <<= 1; bin_exp -= 1; }
+    // Build IEEE 754 double: [sign(1)][exp(11)][mantissa(52)]
+    const biased_exp: u64 = @intCast(bin_exp + 1023);
+    if (biased_exp == 0 or biased_exp >= 2047) return 0; // underflow/overflow → 0
+    const bits: u64 = (if (neg) @as(u64, 1) << 63 else 0) |
+                      (biased_exp << 52) |
+                      (mantissa & 0x000F_FFFF_FFFF_FFFF);
+    return @bitCast(bits);
+}
+
+export fn strtof(s: [*:0]const u8, endptr: ?*?[*:0]u8) callconv(.c) f32 {
+    // Parse as double then truncate bits to single
+    const d: u64 = @bitCast(strtod(s, endptr));
+    const sign: u32 = @intCast((d >> 63) << 31);
+    const exp64: i32 = @intCast((d >> 52) & 0x7FF);
+    const mant64: u64 = d & 0x000F_FFFF_FFFF_FFFF;
+    if (exp64 == 0) return @bitCast(sign); // zero/denorm → 0
+    const exp32: i32 = exp64 - 1023 + 127;
+    if (exp32 <= 0) return @bitCast(sign);
+    if (exp32 >= 255) return @bitCast(sign | 0x7F80_0000); // inf
+    const mant32: u32 = @intCast(mant64 >> 29);
+    const bits: u32 = sign | (@as(u32, @intCast(exp32)) << 23) | mant32;
+    return @bitCast(bits);
+}
+
+export fn strtold(s: [*:0]const u8, endptr: ?*?[*:0]u8) callconv(.c) f64 {
+    return strtod(s, endptr);
+}
+
+export fn qsort(base: [*]u8, nmemb: usize, size: usize,
+    compar: *const fn(*const anyopaque, *const anyopaque) callconv(.c) c_int) callconv(.c) void {
+    if (nmemb <= 1) return;
+    const buf = malloc(@min(size, 4096)) orelse return;
+    defer free(buf);
+    const tmp: [*]u8 = @ptrCast(buf);
+    const elem_size = @min(size, 4096);
+    var i: usize = 1;
+    while (i < nmemb) : (i += 1) {
+        @memcpy(tmp[0..elem_size], base[i * size .. i * size + elem_size]);
+        var j: usize = i;
+        while (j > 0) {
+            const prev = base[(j - 1) * size ..];
+            if (compar(@ptrCast(prev), @ptrCast(tmp)) <= 0) break;
+            @memcpy(base[j * size .. j * size + elem_size], prev[0..elem_size]);
+            j -= 1;
+        }
+        @memcpy(base[j * size .. j * size + elem_size], tmp[0..elem_size]);
+    }
+}
+
+// ldexp: x * 2^exp using bit manipulation on IEEE 754
+export fn ldexp(x: f64, exp: c_int) callconv(.c) f64 {
+    var bits: u64 = @bitCast(x);
+    const biased: i32 = @intCast((bits >> 52) & 0x7FF);
+    if (biased == 0 or biased == 0x7FF) return x;
+    const new_exp: i32 = biased + exp;
+    if (new_exp <= 0) return 0;
+    if (new_exp >= 0x7FF) { // overflow to inf
+        bits = (bits & (1 << 63)) | (@as(u64, 0x7FF) << 52);
+        return @bitCast(bits);
+    }
+    bits = (bits & 0x800F_FFFF_FFFF_FFFF) | (@as(u64, @intCast(new_exp)) << 52);
+    return @bitCast(bits);
+}
+
+// ============================================================================
 // crt0
 // ============================================================================
 
@@ -1608,11 +1852,7 @@ extern fn main() c_int;
 
 export fn _start() callconv(.c) noreturn {
     const ret = main();
-    // Run atexit handlers in reverse order.
     var i = atexit_count;
-    while (i > 0) {
-        i -= 1;
-        if (atexit_handlers[i]) |h| h();
-    }
+    while (i > 0) { i -= 1; if (atexit_handlers[i]) |h| h(); }
     exit(ret);
 }
