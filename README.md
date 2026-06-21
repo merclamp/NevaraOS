@@ -67,8 +67,8 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   `yes` `basename` `dirname` `seq` `tee` `true` `false` `sleep` `uptime`
   `uname` `nevfetch` `chmod` `find` `stat` `strings` `fold` `comm` `printf`
   `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
-  `whoami` `id` `su` `useradd` `userdel` `passwd` — all in one multi-call
-  binary, no libc.
+  `whoami` `id` `su` `useradd` `userdel` `passwd`
+  `ping` `ifconfig` — all in one multi-call binary, no libc.
 
 ## Current status
 
@@ -127,6 +127,12 @@ Twelve foundational stages are done and verified in QEMU:
   for user home dirs; `useradd`/`userdel`/`su`/`whoami`/`id` applets;
   `getuid`/`setuid`/`getgid`/`setgid` and custom `useradd`/`userdel`/
   `getpwnam` syscalls; **nsh** prompt shows `user@nevara:path` with colour.
+- ⚙️  **Networking (implemented, pending end-to-end test)** — PCI scanner,
+  RTL8139 driver (IRQ-driven RX, 32-bit DMA via `pmm.allocLow32`),
+  Ethernet/ARP/IPv4/ICMP/UDP stack; static IP 10.0.2.15/24, GW 10.0.2.2
+  (QEMU SLIRP). `ping` and `ifconfig` NevBox applets; `net_ping`/
+  `net_send`/`net_recv`/`net_info` syscalls. `zig build run` adds
+  `-netdev user -device rtl8139` to QEMU automatically.
 
 ## Roadmap
 
@@ -144,7 +150,9 @@ What still needs to be built (roughly in order):
 - ✅ **Users & permissions** — kernel uid/gid credentials, user DB, `/home`,
   `useradd`/`userdel`/`su`/`whoami`/`id` NevBox applets, POSIX credential
   syscalls, coloured `user@nevara` prompt in **nsh**.
-- ⏳ **Polish** — networking, package manager, and more.
+- ⏳ **Networking end-to-end test** — verify `ping 10.0.2.2` replies,
+  ARP handshake, and UDP round-trip from inside the running OS.
+- ⏳ **Polish** — package manager, TCP, and more.
 
 This is a marathon, not a sprint. Progress happens phase by phase.
 
