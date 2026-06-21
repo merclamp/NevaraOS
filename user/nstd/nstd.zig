@@ -38,6 +38,7 @@ const SYS_net_ping: usize = 1010;
 const SYS_net_send: usize = 1011;
 const SYS_net_recv: usize = 1012;
 const SYS_net_info: usize = 1013;
+const SYS_tty_mode: usize = 1020;
 
 
 
@@ -223,6 +224,9 @@ pub fn netRecv(buf: []u8, src_ip: *[4]u8, src_port: *u16, dst_port: *u16) usize 
 pub fn netInfo(buf: []u8) isize {
     return @bitCast(syscall3(SYS_net_info, @intFromPtr(buf.ptr), buf.len, 0));
 }
+
+/// ttyMode(1) switches stdin to raw (byte-by-byte, no echo); 0 restores canonical.
+pub fn ttyMode(mode: usize) void { _ = syscall1(SYS_tty_mode, mode); }
 
 /// sleep(): sleep for `seconds` seconds (yields to other processes).
 pub fn sleep(seconds: usize) void {

@@ -383,7 +383,10 @@ const null_ops    = DevOps{ .read = nullRead,    .write = sinkWrite };
 const zero_ops    = DevOps{ .read = zeroRead,    .write = sinkWrite };
 
 fn consoleWrite(buf: []const u8) usize { console.writeString(buf); return buf.len; }
-fn consoleRead(buf: []u8) usize        { return tty.readLine(buf); }
+fn consoleRead(buf: []u8) usize {
+    if (tty.raw_mode) return tty.readRaw(buf);
+    return tty.readLine(buf);
+}
 const console_ops = DevOps{ .read = consoleRead, .write = consoleWrite };
 
 // ---- init / mkpipe ----------------------------------------------------------

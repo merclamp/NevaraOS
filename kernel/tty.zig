@@ -269,3 +269,17 @@ pub fn readLine(out: []u8) usize {
     }
     return n;
 }
+
+// ---- raw mode --------------------------------------------------------------
+
+/// When true, consoleRead bypasses the line editor and returns bytes one by one.
+pub var raw_mode: bool = false;
+
+/// Read one raw byte (used when raw_mode = true). Enables interrupts briefly.
+pub fn readRaw(out: []u8) usize {
+    if (out.len == 0) return 0;
+    asm volatile ("sti");
+    defer asm volatile ("cli");
+    out[0] = kbd.blockingPop();
+    return 1;
+}

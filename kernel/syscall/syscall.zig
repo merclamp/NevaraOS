@@ -15,6 +15,7 @@ const usermode = @import("../arch/x86_64/usermode.zig");
 const pit = @import("../arch/x86_64/pit.zig");
 const users = @import("../proc/users.zig");
 const net   = @import("../net/net.zig");
+const tty   = @import("../tty.zig");
 
 
 // Linux x86_64 syscall numbers (subset).
@@ -54,7 +55,8 @@ const SYS_getpwnam:  usize = 1005;
 const SYS_net_ping:  usize = 1010; // ping(ip_ptr, timeout_ms) -> 0=ok, -1=timeout
 const SYS_net_send:  usize = 1011; // udpSend(dst_ip_ptr, sport, dport, buf_ptr, len)
 const SYS_net_recv:  usize = 1012; // udpRecv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr)
-const SYS_net_info:  usize = 1013; // write "ip mac" into buf
+const SYS_net_info:  usize = 1013;
+const SYS_tty_mode:  usize = 1020; // 0=canonical, 1=raw // write "ip mac" into buf
 
 
 
@@ -446,6 +448,9 @@ fn sysNetInfo(buf_ptr: usize, len: usize) isize {
     return 0;
 }
 
+
+fn sysTtyMode(mode: usize) isize { tty.raw_mode = (mode != 0); return 0; }
+
 /// Central dispatcher, invoked from the SYSCALL handler with a saved trap frame.
 /// Returns the value to place in the caller's rax (exit/execve do not return).
 fn sysUnlink(path_ptr: usize) isize {
@@ -611,6 +616,7 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_net_send  => sysNetSend(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_recv  => sysNetRecv(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_info  => sysNetInfo(a1, a2),
+        SYS_tty_mode  => sysTtyMode(a1),
         else => -ENOSYS,
     };
 }
