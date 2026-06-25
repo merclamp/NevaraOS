@@ -35,6 +35,9 @@ const SYS_useradd: usize = 1003;
 const SYS_userdel: usize = 1004;
 const SYS_getpwnam: usize = 1005;
 const SYS_reboot: usize = 1006;
+const SYS_kill: usize = 62;
+const SYS_signal: usize = 48;
+const SYS_sigreturn: usize = 1007;
 const SYS_net_ping: usize = 1010;
 const SYS_net_send: usize = 1011;
 const SYS_net_recv: usize = 1012;
@@ -299,6 +302,52 @@ pub fn sleep(seconds: usize) void {
 /// success; returns negative errno (e.g. -EPERM) if the caller is not root.
 pub fn reboot(mode: usize) isize {
     return @bitCast(syscall1(SYS_reboot, mode));
+}
+
+// ---- Signals ----------------------------------------------------------------
+
+pub const SIG_DFL: usize = 0;
+pub const SIG_IGN: usize = 1;
+
+pub const SIGHUP: usize = 1;
+pub const SIGINT: usize = 2;
+pub const SIGQUIT: usize = 3;
+pub const SIGILL: usize = 4;
+pub const SIGABRT: usize = 6;
+pub const SIGFPE: usize = 8;
+pub const SIGKILL: usize = 9;
+pub const SIGUSR1: usize = 10;
+pub const SIGSEGV: usize = 11;
+pub const SIGUSR2: usize = 12;
+pub const SIGPIPE: usize = 13;
+pub const SIGALRM: usize = 14;
+pub const SIGTERM: usize = 15;
+
+/// The sigreturn trampoline: a handler's `ret` lands here, and it asks the
+/// kernel to restore the interrupted frame. Registered with every signal().
+export fn __nstd_sigreturn() callconv(.naked) void {
+    asm volatile (
+        \\ movq $1007, %rax
+        \\ syscall
+    );
+}
+
+/// kill(pid, sig): send `sig` to process `pid`. Returns 0 or negative errno.
+pub fn kill(pid: isize, sig: usize) isize {
+    return @bitCast(syscall3(SYS_kill, @bitCast(pid), sig, 0));
+}
+
+/// signal(sig, handler): set the disposition for `sig` (SIG_DFL, SIG_IGN, or a
+/// handler address from @intFromPtr). Returns the previous disposition, or
+/// negative errno. System-V one-shot: a caught handler resets to SIG_DFL before
+/// it runs, so re-arm inside the handler if you want it to persist.
+pub fn signal(sig: usize, handler: usize) isize {
+    return @bitCast(syscall3(SYS_signal, sig, handler, @intFromPtr(&__nstd_sigreturn)));
+}
+
+/// raise(sig): send `sig` to the current process.
+pub fn raise(sig: usize) isize {
+    return kill(@intCast(getpid()), sig);
 }
 
 /// uptimeTicks(): returns jiffies since boot (PIT at 100 Hz → divide by 100 for seconds).

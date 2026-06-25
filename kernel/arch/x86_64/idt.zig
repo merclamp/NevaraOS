@@ -11,6 +11,7 @@ const sched = @import("../../proc/sched.zig");
 const kbd = @import("kbd.zig");
 const pit = @import("pit.zig");
 const rtl8139 = @import("../../net/rtl8139.zig");
+const process = @import("../../proc/process.zig");
 
 
 /// 64-bit IDT gate descriptor (16 bytes).
@@ -146,6 +147,20 @@ export fn isrHandler(frame: *InterruptFrame) callconv(.c) void {
         console.writeHex(frame.rip);
         console.writeString(" -- resuming\n");
         return;
+    }
+
+    // A CPU exception taken in ring 3 is the user program's fault, not the
+    // kernel's: kill it with SIGSEGV instead of bringing the machine down.
+    if ((frame.cs & 3) == 3) {
+        const p = process.current();
+        console.writeString("[signal] PID ");
+        console.writeDec(p.pid);
+        console.writeString(" killed by SIGSEGV (");
+        if (vec < exception_names.len) console.writeString(exception_names[vec]);
+        console.writeString(") at rip=");
+        console.writeHex(frame.rip);
+        console.writeString("\n");
+        process.exit(128 + 11); // 128 + SIGSEGV
     }
 
     console.writeString("\n*** CPU EXCEPTION ***\n");

@@ -11,6 +11,7 @@ const vfs = @import("../fs/vfs.zig");
 const elf = @import("../exec/elf.zig");
 const usermode = @import("../arch/x86_64/usermode.zig");
 const console = @import("../arch/x86_64/console.zig");
+const signals = @import("signals.zig");
 
 pub const MAX_FD = 64;
 
@@ -55,6 +56,12 @@ pub const Process = struct {
     arglen: [MAX_ARGS]usize = undefined,
     argc: usize = 0,
     fork_tf: usermode.TrapFrame = undefined,
+
+    // Signals: pending bitmask, per-signal disposition (SIG_DFL/SIG_IGN/addr),
+    // and the user restorer trampoline address (set on the first signal()).
+    sig_pending: u32 = 0,
+    sig_handlers: [32]u64 = [_]u64{0} ** 32,
+    sig_restorer: u64 = 0,
 };
 
 var procs: [MAX_PROC]Process = .{Process{}} ** MAX_PROC;
@@ -63,6 +70,14 @@ var next_pid: u32 = 0;
 fn allocProc() ?*Process {
     for (&procs) |*p| {
         if (p.state == .unused) return p;
+    }
+    return null;
+}
+
+/// Find a live process by pid (used by kill()).
+pub fn byPid(pid: u32) ?*Process {
+    for (&procs) |*p| {
+        if (p.state != .unused and p.pid == pid) return p;
     }
     return null;
 }
@@ -202,6 +217,9 @@ pub fn fork(tf: *const usermode.TrapFrame) isize {
             if (f.node.pipe) |pipe| pipe.writers += 1;
         }
     }
+    // A child inherits the parent's signal dispositions; pending is cleared.
+    p.sig_handlers = parent.sig_handlers;
+    p.sig_restorer = parent.sig_restorer;
     p.fork_tf = tf.*;
     p.fork_tf.rax = 0;
 
@@ -257,6 +275,10 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
     p.cr3 = new_cr3;
     if (p.thread) |t| t.cr3 = new_cr3;
     p.brk = 0;
+    // execve resets caught signals to default and forgets the old restorer.
+    p.sig_handlers = [_]u64{0} ** 32;
+    p.sig_restorer = 0;
+    p.sig_pending = 0;
     vmm.freeUserSpace(old_cr3);
 
     const entry = elf.load(image) orelse exit(127);
@@ -315,6 +337,7 @@ pub fn wait4(pid: isize, status_ptr: usize, options: usize) isize {
         }
         if (!has_child) return -10; // ECHILD
         if (options & WNOHANG != 0) return 0;
+        signals.checkBlocked(); // a terminating signal aborts the wait
         sched.yield(); // let the child make progress
     }
 }

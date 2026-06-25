@@ -106,6 +106,8 @@ pub fn main() void {
     else if (eq(cmd, "zinit-ctl")) appletZinitCtl()
     else if (eq(cmd, "reboot"))   appletReboot()
     else if (eq(cmd, "poweroff")) appletPoweroff()
+    else if (eq(cmd, "kill"))     appletKill()
+    else if (eq(cmd, "sigtest"))  appletSigtest()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
@@ -113,8 +115,94 @@ pub fn main() void {
                     "find stat strings fold comm printf which xargs " ++
                     "ln env dd od nl du " ++
                     "whoami id su useradd userdel passwd " ++
-                    "ping ifconfig clear zinit-ctl reboot poweroff\n");
+                    "ping ifconfig clear zinit-ctl reboot poweroff " ++
+                    "kill sigtest\n");
 
+}
+
+// ---- kill ------------------------------------------------------------------
+
+fn appletKill() void {
+    // kill [-SIGNUM] <pid>...
+    var i: usize = 1;
+    var sig: usize = 15; // SIGTERM
+    if (nstd.arg(1)) |a0| {
+        if (a0.len >= 2 and a0[0] == '-') {
+            sig = parseNat(a0[1..]) orelse 15;
+            i = 2;
+        }
+    }
+    var any = false;
+    while (nstd.arg(i)) |a| : (i += 1) {
+        any = true;
+        const pid = parseNat(a) orelse {
+            nstd.print("kill: bad pid '");
+            nstd.print(a);
+            nstd.print("'\n");
+            continue;
+        };
+        if (nstd.kill(@intCast(pid), sig) < 0) {
+            nstd.print("kill: (");
+            nstd.print(a);
+            nstd.print(") no such process or not permitted\n");
+        }
+    }
+    if (!any) nstd.print("usage: kill [-SIGNUM] <pid>...\n");
+}
+
+// ---- sigtest (self-contained signals smoke test) ---------------------------
+
+var sigtest_caught: usize = 0;
+
+fn sigtestHandler(s: i32) callconv(.c) void {
+    sigtest_caught = @intCast(s);
+    nstd.print("[sigtest]   handler invoked for signal ");
+    nstd.printDec(@intCast(s));
+    nstd.print("\n");
+}
+
+fn appletSigtest() void {
+    // 1. Catchable handler + sigreturn round-trip.
+    nstd.print("[sigtest] 1) install SIGUSR1 handler, raise it\n");
+    _ = nstd.signal(nstd.SIGUSR1, @intFromPtr(&sigtestHandler));
+    _ = nstd.raise(nstd.SIGUSR1);
+    nstd.print("[sigtest]   resumed in main; caught=");
+    nstd.printDec(sigtest_caught);
+    nstd.print(" (expect 10)\n");
+
+    // 2. Default action = terminate (child raises SIGTERM on itself).
+    nstd.print("[sigtest] 2) child raises SIGTERM (default terminate)\n");
+    const pid = nstd.fork();
+    if (pid == 0) {
+        _ = nstd.raise(nstd.SIGTERM);
+        nstd.print("[sigtest]   BUG: child survived SIGTERM\n");
+        nstd.exit(0);
+    }
+    var st: u32 = 0;
+    _ = nstd.waitpid(pid, &st, 0);
+    nstd.print("[sigtest]   child status word=");
+    nstd.printDec(st);
+    nstd.print(" (expect ");
+    nstd.printDec((128 + 15) << 8);
+    nstd.print(")\n");
+
+    // 3. SIGSEGV from a wild store (kernel turns the fault into a signal).
+    nstd.print("[sigtest] 3) child stores to an unmapped address\n");
+    const pid2 = nstd.fork();
+    if (pid2 == 0) {
+        var addr: usize = 0xdead_0000;
+        const bad: *volatile u64 = @ptrFromInt(addr);
+        bad.* = 0x1234;
+        addr += 1; // keep addr "used"
+        nstd.exit(0);
+    }
+    var st2: u32 = 0;
+    _ = nstd.waitpid(pid2, &st2, 0);
+    nstd.print("[sigtest]   segv child status word=");
+    nstd.printDec(st2);
+    nstd.print(" (expect ");
+    nstd.printDec((128 + 11) << 8);
+    nstd.print(")\n[sigtest] done\n");
 }
 
 // ---- zinit-ctl / reboot / poweroff -----------------------------------------

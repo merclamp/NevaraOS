@@ -8,6 +8,7 @@ const console = @import("console.zig");
 const pmm = @import("../../mm/pmm.zig");
 const vmm = @import("../../mm/vmm.zig");
 const syscall = @import("../../syscall/syscall.zig");
+const signals = @import("../../proc/signals.zig");
 
 // SYSCALL/SYSRET MSRs.
 const MSR_EFER: u32 = 0xC000_0080;
@@ -72,6 +73,9 @@ inline fn rdmsr(msr: u32) u64 {
 /// back into the trap frame's rax; the asm path then iretq's to ring 3.
 export fn syscall_from_user(tf: *TrapFrame) callconv(.c) void {
     tf.rax = @bitCast(syscall.handle(tf));
+    // Deliver any pending signal before returning to ring 3. This may redirect
+    // `tf` into a user handler, or terminate the process (noreturn).
+    signals.deliver(tf);
 }
 
 /// Configure SYSCALL/SYSRET: segment selectors, the entry point, the RFLAGS

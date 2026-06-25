@@ -11,10 +11,9 @@
 //!     /var/run/zinit.status.
 //!   * Logs lifecycle events to /var/log/syslog, rotated at 1 MiB.
 //!
-//! Note: the kernel has no signals yet, so `stop`/`restart` of an already
-//! running service cannot forcibly kill it — they take effect on the service's
-//! next exit (stop disables respawn; restart re-enables it). Forceful
-//! termination waits on Phase II-E signals.
+//! `stop`/`restart` of a running service send SIGTERM (II-E signals); the
+//! service is reaped on the next supervision pass and either stays down (stop
+//! disabled respawn) or comes back (restart kept it enabled).
 
 const nstd = @import("nstd");
 
@@ -498,7 +497,10 @@ fn handleCommand(line: []const u8) void {
         target = .single;
         syslog("switching to target: single");
         for (services[0..svc_count]) |*svc| {
-            if (svc.used and !svc.is_shell) svc.enabled = false;
+            if (svc.used and !svc.is_shell) {
+                svc.enabled = false;
+                if (svc.state == .running) _ = nstd.kill(svc.pid, nstd.SIGTERM);
+            }
         }
     } else if (eqStr(verb, "multi")) {
         target = .multi;
@@ -518,7 +520,8 @@ fn handleCommand(line: []const u8) void {
         if (findByName(arg)) |svc| {
             svc.enabled = false;
             if (svc.state == .running) {
-                syslogSvc("control: stop '", svc, "' (effective on next exit; no kill yet)");
+                _ = nstd.kill(svc.pid, nstd.SIGTERM); // reaped next loop; disabled => no respawn
+                syslogSvc("control: stop '", svc, "' (sent SIGTERM)");
             } else {
                 svc.state = .stopped;
                 syslogSvc("control: stop '", svc, "'");
@@ -529,8 +532,13 @@ fn handleCommand(line: []const u8) void {
             svc.enabled = true;
             svc.backoff = 0;
             svc.restart_at = 0;
-            if (svc.state != .running) svc.state = .exited;
-            syslogSvc("control: restart '", svc, "' (running ones restart on next exit)");
+            if (svc.state == .running) {
+                _ = nstd.kill(svc.pid, nstd.SIGTERM); // enabled => respawn when reaped
+                syslogSvc("control: restart '", svc, "' (sent SIGTERM)");
+            } else {
+                svc.state = .exited;
+                syslogSvc("control: restart '", svc, "'");
+            }
         }
     }
 }

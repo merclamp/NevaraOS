@@ -9,6 +9,18 @@
 
 const console = @import("arch/x86_64/console.zig");
 const kbd = @import("arch/x86_64/kbd.zig");
+const process = @import("proc/process.zig");
+const signals = @import("proc/signals.zig");
+
+/// Block for one key, but stay interruptible: a pending terminating signal for
+/// the current process aborts the wait (checkBlocked is noreturn in that case).
+fn blockingKey() u8 {
+    while (true) {
+        if (kbd.pop()) |c| return c;
+        signals.checkBlocked();
+        asm volatile ("hlt");
+    }
+}
 
 const LINE_MAX = 256;
 const HIST_MAX = 16;
@@ -231,7 +243,7 @@ pub fn readLine(out: []u8) usize {
     defer asm volatile ("cli");
 
     while (true) {
-        const c = kbd.blockingPop();
+        const c = blockingKey();
         switch (c) {
             '\r', '\n' => break,
             0x1B => handleEscape(),
@@ -244,7 +256,8 @@ pub fn readLine(out: []u8) usize {
             0x15 => killLine(), // Ctrl-U
             0x17 => killWord(), // Ctrl-W
             0x0C => clearAndRedraw(), // Ctrl-L
-            0x03 => { // Ctrl-C: abandon the line
+            0x03 => { // Ctrl-C: send SIGINT to the foreground reader, abandon line
+                signals.post(process.current(), signals.SIGINT);
                 console.writeString("^C\n");
                 return 0;
             },
@@ -280,6 +293,6 @@ pub fn readRaw(out: []u8) usize {
     if (out.len == 0) return 0;
     asm volatile ("sti");
     defer asm volatile ("cli");
-    out[0] = kbd.blockingPop();
+    out[0] = blockingKey();
     return 1;
 }

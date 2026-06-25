@@ -69,7 +69,7 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   `uname` `nevfetch` `chmod` `find` `stat` `strings` `fold` `comm` `printf`
   `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
   `whoami` `id` `su` `useradd` `userdel` `passwd`
-  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear`
+  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear` `kill` `sigtest`
   — all in one multi-call binary, no libc.
 
 ## Current status
@@ -230,17 +230,27 @@ ZInit is now a real supervisor instead of a getty exec-loop:
   `restart <svc>`, `single`, `multi`, `reboot`, `poweroff`. Talks to PID 1
   through a polled command file (`/var/run/zinit.ctl`); ZInit publishes a live
   snapshot to `/var/run/zinit.status`. Plus standalone `reboot` / `poweroff`
-  applets that call `SYS_reboot` directly. *Caveat:* with no signals yet,
-  `stop`/`restart` of an **already running** service take effect on its next
-  exit (they toggle the respawn decision) — forceful kill awaits II-E.
+  applets that call `SYS_reboot` directly. `stop`/`restart` of a running
+  service send **SIGTERM** (II-E signals) and the service is reaped on the next
+  supervision pass.
 - ✅ **Syslog** — lifecycle events are timestamped (from `pit.jiffies`) and
   appended to `/var/log/syslog`, **rotated to `syslog.0` at 1 MiB**, and
   mirrored to the console.
 
 #### II-E · Kernel hardening
 
-- ⏳ **Signals kernel-side** — `SYS_kill=62`, `SYS_signal=48`, pending-signal
-  bitmask per-process; deliver on syscall return path.
+- ✅ **Signals kernel-side** — `SYS_kill=62`, `SYS_signal=48`, `SYS_sigreturn`,
+  with a per-process pending bitmask and disposition table (`SIG_DFL`/`SIG_IGN`/
+  handler). Delivered on the syscall-return path: a caught signal runs a real
+  **user handler** on a frame built on the user stack and returns through a
+  `sigreturn` trampoline (System-V one-shot semantics). Default actions
+  terminate (SIGINT/TERM/SEGV/KILL…; SIGKILL uncatchable). Blocking waits (TTY
+  read, `wait4`, `sleep`) are signal-interruptible, so `kill` reaches a blocked
+  process; a ring-3 CPU exception is turned into **SIGSEGV** (the kernel no
+  longer halts on a bad user pointer). Ctrl-C raises SIGINT (the shell ignores
+  it). `kill` NevBox applet + `sigtest` self-test; nstd `kill`/`signal`/`raise`.
+  Verified in QEMU: handler round-trip, default-terminate, and SIGSEGV-from-fault
+  all produce the expected status words.
 - ⏳ **`/proc` virtual filesystem** — read-only entries: `/proc/self/pid`,
   `/proc/self/maps`, `/proc/meminfo`, `/proc/uptime`, `/proc/version`,
   `/proc/<pid>/status` for each live process.

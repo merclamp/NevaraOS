@@ -17,6 +17,7 @@ const users = @import("../proc/users.zig");
 const net     = @import("../net/net.zig");
 const rtl8139 = @import("../net/rtl8139.zig");
 const tty     = @import("../tty.zig");
+const signals = @import("../proc/signals.zig");
 
 
 // Linux x86_64 syscall numbers (subset).
@@ -31,6 +32,9 @@ const SYS_fork: usize = 57;
 const SYS_execve: usize = 59;
 const SYS_exit: usize = 60;
 const SYS_wait4: usize = 61;
+const SYS_kill: usize = 62;
+const SYS_signal: usize = 48;
+const SYS_sigreturn: usize = 1007;
 const SYS_mkdir: usize = 83;
 const SYS_pipe: usize = 22;
 const SYS_dup2: usize = 33;
@@ -75,6 +79,7 @@ const SYS_tty_mode:    usize = 1020;
 // errno values (returned negated).
 const EPERM: isize = 1;
 const ENOENT: isize = 2;
+const ESRCH: isize = 3;
 const EBADF: isize = 9;
 const ECHILD: isize = 10;
 const ENOMEM: isize = 12;
@@ -484,7 +489,10 @@ fn sysRename(old_ptr: usize, new_ptr: usize) isize {
 /// Sleep for `seconds` seconds by yielding to the scheduler until jiffies advances.
 fn sysSleep(seconds: usize) isize {
     const target = pit.jiffies + @as(u64, seconds) * 100;
-    while (pit.jiffies < target) sched.yield();
+    while (pit.jiffies < target) {
+        signals.checkBlocked(); // a terminating signal cuts the sleep short
+        sched.yield();
+    }
     return 0;
 }
 
@@ -575,6 +583,39 @@ fn sysReboot(mode: usize) isize {
     while (true) asm volatile ("hlt");
 }
 
+// SYS_kill(pid, sig) -> 0 or -errno. Posts `sig` to process `pid`.
+fn sysKill(pid_raw: usize, sig: usize) isize {
+    const pid: isize = @bitCast(pid_raw);
+    if (sig >= signals.NSIG) return -EINVAL;
+    if (pid <= 0) return -ESRCH; // process groups not supported yet
+    const target = process.byPid(@intCast(pid)) orelse return -ESRCH;
+    const me = process.current();
+    if (me.euid != 0 and me.uid != target.uid) return -EPERM;
+    if (sig == 0) return 0; // permission/existence probe
+    signals.post(target, @intCast(sig));
+    return 0;
+}
+
+// SYS_signal(sig, handler, restorer) -> previous disposition or -errno.
+// handler is SIG_DFL(0), SIG_IGN(1), or a user function address; restorer is
+// the address of the user sigreturn trampoline (recorded once per process).
+fn sysSignal(sig: usize, handler: usize, restorer: usize) isize {
+    if (sig == 0 or sig >= signals.NSIG or sig == signals.SIGKILL) return -EINVAL;
+    const p = process.current();
+    const prev = p.sig_handlers[sig];
+    p.sig_handlers[sig] = handler;
+    if (restorer != 0) p.sig_restorer = restorer;
+    return @bitCast(prev);
+}
+
+// SYS_sigreturn: restore the trap frame saved when the handler was entered.
+// The trampoline issues this with rsp pointing at the saved frame.
+fn sysSigreturn(tf: *usermode.TrapFrame) isize {
+    const saved: *const usermode.TrapFrame = @ptrFromInt(tf.rsp);
+    tf.* = saved.*;
+    return @bitCast(tf.rax); // preserve the interrupted syscall's result
+}
+
 /// Append s into buf[pos..limit-1], leaving room for a nul. Returns new pos.
 fn appendBuf(buf: [*]u8, pos: usize, limit: usize, s: []const u8) usize {
     if (limit == 0 or pos + 1 >= limit) return pos;
@@ -642,6 +683,9 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
 
         SYS_exit => process.exit(@bitCast(@as(u32, @truncate(a1)))),
         SYS_wait4 => process.wait4(@bitCast(a1), a2, a3),
+        SYS_kill => sysKill(a1, a2),
+        SYS_signal => sysSignal(a1, a2, a3),
+        SYS_sigreturn => sysSigreturn(tf),
         SYS_mkdir => sysMkdir(a1),
         SYS_pipe => sysPipe(a1),
         SYS_dup2 => sysDup2(a1, a2),

@@ -195,6 +195,9 @@ fn buildPath(cmd: []const u8, buf: []u8) ?[*:0]const u8 {
 // ---- builtins --------------------------------------------------------------
 
 pub fn main() void {
+    // The shell ignores SIGINT (Ctrl-C): it abandons the current line and
+    // reprompts instead of dying. Foreground children keep the default action.
+    _ = nstd.signal(nstd.SIGINT, nstd.SIG_IGN);
     nstd.print("\n\x1b[1;36mNevara shell (nsh)\x1b[0m - type 'help' or 'exit'\n");
 
     while (true) {
