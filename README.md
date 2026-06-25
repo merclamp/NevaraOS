@@ -69,7 +69,8 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   `uname` `nevfetch` `chmod` `find` `stat` `strings` `fold` `comm` `printf`
   `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
   `whoami` `id` `su` `useradd` `userdel` `passwd`
-  `ping` `ifconfig` — all in one multi-call binary, no libc.
+  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear`
+  — all in one multi-call binary, no libc.
 
 ## Current status
 
@@ -207,21 +208,34 @@ making it a realistic porting target once ZLibc is sufficiently complete.
 - ⏳ **Smoke test** — `nano /etc/hostname` opens, edits, and saves; Ctrl-X
   exits; arrow keys, PgUp/PgDn, Ctrl-K/U work correctly.
 
-#### II-D · ZInit — real PID 1
+#### II-D · ZInit — real PID 1 ✅ Complete
 
-ZInit currently just exec-loops nsh.  A proper init system needs:
+ZInit is now a real supervisor instead of a getty exec-loop:
 
-- ⏳ **Service table** — a static array of service descriptors (name, path,
-  args, restart policy, dependencies); read from `/etc/zinit.conf`.
-- ⏳ **Supervision loop** — spawn all services in dependency order; `wait4`
-  in a tight loop; restart crashed services with exponential back-off.
-- ⏳ **Runlevels / targets** — `single` (maintenance shell only), `multi`
-  (full services), `reboot` / `poweroff` (QEMU ACPI shutdown via port 0x604).
-- ⏳ **`zinit-ctl` applet** — `status`, `start <svc>`, `stop <svc>`,
-  `restart <svc>`, `list`; communicates with ZInit via a simple pipe or
-  shared memory flag.
-- ⏳ **Syslog** — write kernel/service messages to `/var/log/syslog`
-  (ring-buffer backed, rotated at 1 MiB).
+- ✅ **Service table** — a static array of service descriptors (name, path,
+  args, restart policy) parsed from `/etc/zinit.conf`. Format is
+  `<name> <respawn|once|wait> <path> [args...]`, with a `target single|multi`
+  directive; start order in the file *is* the dependency order. A built-in
+  default (`shell respawn /bin/nsh`) is used if the config is missing.
+- ✅ **Supervision loop** — services are spawned with `fork`/`execve`, reaped
+  with non-blocking `wait4(WNOHANG)`, and `respawn` services are restarted with
+  **exponential back-off** (1→2→4…→30 s, reset after 60 s of uptime). `wait`
+  services run to completion before later services start; `once` services never
+  restart. Verified in QEMU: a crashing service restarts at 1 s, 2 s, 4 s, … .
+- ✅ **Runlevels / targets** — `single` (maintenance shell only), `multi`
+  (all services), and `reboot` / `poweroff` via a new kernel **`SYS_reboot`**
+  syscall (QEMU ACPI port `0x604`/`0xB004` for power-off; `0x64`/`0xCF9` reset
+  for reboot).
+- ✅ **`zinit-ctl` applet** — `status` / `list`, `start <svc>`, `stop <svc>`,
+  `restart <svc>`, `single`, `multi`, `reboot`, `poweroff`. Talks to PID 1
+  through a polled command file (`/var/run/zinit.ctl`); ZInit publishes a live
+  snapshot to `/var/run/zinit.status`. Plus standalone `reboot` / `poweroff`
+  applets that call `SYS_reboot` directly. *Caveat:* with no signals yet,
+  `stop`/`restart` of an **already running** service take effect on its next
+  exit (they toggle the respawn decision) — forceful kill awaits II-E.
+- ✅ **Syslog** — lifecycle events are timestamped (from `pit.jiffies`) and
+  appended to `/var/log/syslog`, **rotated to `syslog.0` at 1 MiB**, and
+  mirrored to the console.
 
 #### II-E · Kernel hardening
 

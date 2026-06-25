@@ -103,6 +103,9 @@ pub fn main() void {
     else if (eq(cmd, "ping"))     appletPing()
     else if (eq(cmd, "ifconfig")) appletIfconfig()
     else if (eq(cmd, "clear"))    appletClear()
+    else if (eq(cmd, "zinit-ctl")) appletZinitCtl()
+    else if (eq(cmd, "reboot"))   appletReboot()
+    else if (eq(cmd, "poweroff")) appletPoweroff()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
@@ -110,8 +113,78 @@ pub fn main() void {
                     "find stat strings fold comm printf which xargs " ++
                     "ln env dd od nl du " ++
                     "whoami id su useradd userdel passwd " ++
-                    "ping ifconfig clear\n");
+                    "ping ifconfig clear zinit-ctl reboot poweroff\n");
 
+}
+
+// ---- zinit-ctl / reboot / poweroff -----------------------------------------
+
+/// Append a control line "<verb>[ <arg>]\n" to ZInit's command file.
+fn ctlSend(verb: []const u8, arg: ?[]const u8) void {
+    const fd_raw = nstd.open("/var/run/zinit.ctl", 0o100 | 0o2000); // O_CREAT | O_APPEND
+    if (fd_raw < 0) {
+        nstd.print("zinit-ctl: cannot open /var/run/zinit.ctl\n");
+        return;
+    }
+    const fd: usize = @intCast(fd_raw);
+    _ = nstd.write(fd, verb);
+    if (arg) |a| {
+        _ = nstd.write(fd, " ");
+        _ = nstd.write(fd, a);
+    }
+    _ = nstd.write(fd, "\n");
+    nstd.close(fd);
+    nstd.print("zinit-ctl: queued '");
+    nstd.print(verb);
+    if (arg) |a| {
+        nstd.print(" ");
+        nstd.print(a);
+    }
+    nstd.print("'\n");
+}
+
+fn appletZinitCtl() void {
+    const sub = nstd.arg(1) orelse {
+        nstd.print("usage: zinit-ctl <status|list|start|stop|restart|single|multi|reboot|poweroff> [service]\n");
+        return;
+    };
+    if (eq(sub, "status") or eq(sub, "list")) {
+        const fd_raw = nstd.open("/var/run/zinit.status", 0);
+        if (fd_raw < 0) {
+            nstd.print("zinit-ctl: no status file (is zinit running?)\n");
+            return;
+        }
+        const fd: usize = @intCast(fd_raw);
+        var buf: [1024]u8 = undefined;
+        while (true) {
+            const n = nstd.read(fd, &buf);
+            if (n == 0) break;
+            _ = nstd.write(1, buf[0..n]);
+        }
+        nstd.close(fd);
+    } else if (eq(sub, "start") or eq(sub, "stop") or eq(sub, "restart")) {
+        const name = nstd.arg(2) orelse {
+            nstd.print("usage: zinit-ctl ");
+            nstd.print(sub);
+            nstd.print(" <service>\n");
+            return;
+        };
+        ctlSend(sub, name);
+    } else if (eq(sub, "single") or eq(sub, "multi") or eq(sub, "reboot") or eq(sub, "poweroff")) {
+        ctlSend(sub, null);
+    } else {
+        nstd.print("zinit-ctl: unknown command '");
+        nstd.print(sub);
+        nstd.print("'\n");
+    }
+}
+
+fn appletReboot() void {
+    if (nstd.reboot(1) < 0) nstd.print("reboot: permission denied (root only)\n");
+}
+
+fn appletPoweroff() void {
+    if (nstd.reboot(0) < 0) nstd.print("poweroff: permission denied (root only)\n");
 }
 // ---- clear -----------------------------------------------------------------
 

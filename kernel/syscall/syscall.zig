@@ -53,6 +53,7 @@ const SYS_getegid: usize = 108;
 const SYS_useradd: usize = 1003;
 const SYS_userdel: usize = 1004;
 const SYS_getpwnam:  usize = 1005;
+const SYS_reboot:    usize = 1006; // reboot(mode): 0=poweroff, 1=reboot. Root only.
 const SYS_net_ping:  usize = 1010; // ping(ip_ptr, timeout_ms) -> 0=ok, -1=timeout
 const SYS_net_send:  usize = 1011; // udpSend(dst_ip_ptr, sport, dport, buf_ptr, len)
 const SYS_net_recv:  usize = 1012; // udpRecv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr)
@@ -534,6 +535,46 @@ fn sysUserdel(name_ptr: usize) isize {
     return if (users.remove(cstr(name_ptr))) 0 else -ENOENT;
 }
 
+inline fn outb(port: u16, value: u8) void {
+    asm volatile ("outb %[v], %[p]"
+        :
+        : [v] "{al}" (value),
+          [p] "{dx}" (port),
+    );
+}
+
+inline fn outw(port: u16, value: u16) void {
+    asm volatile ("outw %[v], %[p]"
+        :
+        : [v] "{ax}" (value),
+          [p] "{dx}" (port),
+    );
+}
+
+// SYS_reboot(mode): 0 = power off, 1 = reboot. Root only. Does not return on
+// success. We try the common QEMU/Bochs shutdown ports, then fall back to a
+// triple fault (reboot) or a hard halt (poweroff) if the platform ignores us.
+fn sysReboot(mode: usize) isize {
+    if (process.current().euid != 0) return -EPERM;
+    asm volatile ("cli");
+    if (mode == 0) {
+        // ACPI poweroff: QEMU (>= 2.0) listens on 0x604, older Bochs on 0xB004,
+        // some configs on 0x600. Writing 0x2000 sets SLP_TYP=S5 + SLP_EN.
+        outw(0x604, 0x2000);
+        outw(0xB004, 0x2000);
+        outw(0x600, 0x2000);
+    } else {
+        // Reboot: pulse the CPU reset line via the 8042 keyboard controller,
+        // then fall back to the PCI reset control register (port 0xCF9), which
+        // QEMU's i440fx/q35 chipsets honour.
+        outb(0x64, 0xFE);
+        outb(0xCF9, 0x02);
+        outb(0xCF9, 0x06);
+    }
+    // If we get here the platform ignored the request; park the CPU.
+    while (true) asm volatile ("hlt");
+}
+
 /// Append s into buf[pos..limit-1], leaving room for a nul. Returns new pos.
 fn appendBuf(buf: [*]u8, pos: usize, limit: usize, s: []const u8) usize {
     if (limit == 0 or pos + 1 >= limit) return pos;
@@ -623,6 +664,7 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_useradd  => sysUseradd(a1, a2, a3),
         SYS_userdel  => sysUserdel(a1),
         SYS_getpwnam => sysGetpwnam(a1, a2, a3),
+        SYS_reboot   => sysReboot(a1),
         SYS_net_ping  => sysNetPing(a1, a2),
         SYS_net_send  => sysNetSend(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_recv  => sysNetRecv(a1, a2, a3, tf.r10, tf.r8),

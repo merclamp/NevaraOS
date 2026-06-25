@@ -34,6 +34,7 @@ const SYS_getegid: usize = 108;
 const SYS_useradd: usize = 1003;
 const SYS_userdel: usize = 1004;
 const SYS_getpwnam: usize = 1005;
+const SYS_reboot: usize = 1006;
 const SYS_net_ping: usize = 1010;
 const SYS_net_send: usize = 1011;
 const SYS_net_recv: usize = 1012;
@@ -292,6 +293,12 @@ pub fn tcpStatus(sock: usize) isize {
 /// sleep(): sleep for `seconds` seconds (yields to other processes).
 pub fn sleep(seconds: usize) void {
     _ = syscall1(SYS_sleep, seconds);
+}
+
+/// reboot(mode): 0 = power off, 1 = reboot. Root only. Does not return on
+/// success; returns negative errno (e.g. -EPERM) if the caller is not root.
+pub fn reboot(mode: usize) isize {
+    return @bitCast(syscall1(SYS_reboot, mode));
 }
 
 /// uptimeTicks(): returns jiffies since boot (PIT at 100 Hz → divide by 100 for seconds).

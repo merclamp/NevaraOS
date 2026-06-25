@@ -229,7 +229,8 @@ pub fn build(b: *std.Build) void {
         \\ROOTFS="$(dirname "$OUT")/rootfsdir"
         \\rm -rf "$ROOTFS"
         \\mkdir -p "$ROOTFS/bin" "$ROOTFS/etc" "$ROOTFS/tmp" "$ROOTFS/mnt" \
-        \\          "$ROOTFS/root" "$ROOTFS/home" "$ROOTFS/etc/skel"
+        \\          "$ROOTFS/root" "$ROOTFS/home" "$ROOTFS/etc/skel" \
+        \\          "$ROOTFS/var" "$ROOTFS/var/log" "$ROOTFS/var/run"
         \\
         \\cp "$ZINIT"  "$ROOTFS/bin/zinit"
         \\cp "$NSH"    "$ROOTFS/bin/nsh"
@@ -242,10 +243,23 @@ pub fn build(b: *std.Build) void {
         \\           yes basename dirname rm mv sleep chmod \
         \\           find stat strings fold comm printf which xargs ln env dd od nl du \
         \\           whoami id su useradd userdel passwd \
-        \\           ping ifconfig clear; do
+        \\           ping ifconfig clear zinit-ctl reboot poweroff; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
         \\printf 'nevara\n'                            > "$ROOTFS/etc/hostname"
+        \\cat > "$ROOTFS/etc/zinit.conf" <<'EOF'
+        \\# /etc/zinit.conf — Nevara init service table.
+        \\#
+        \\# Format: <name> <policy> <path> [args...]
+        \\#   policy: respawn  restart whenever it exits (services, getty)
+        \\#           once     start once at boot, never restart
+        \\#           wait     oneshot: run to completion before later services
+        \\# Lines starting with '#' and blank lines are ignored.
+        \\# 'target single|multi' sets the default runlevel (default: multi).
+        \\
+        \\target multi
+        \\shell respawn /bin/nsh
+        \\EOF
         \\printf 'root:x:0:0:root:/root:/bin/nsh\n'   > "$ROOTFS/etc/passwd"
         \\printf 'root:x:0:\n'                         > "$ROOTFS/etc/group"
         \\printf 'root:!:19900:0:99999:7:::\n'         > "$ROOTFS/etc/shadow"
