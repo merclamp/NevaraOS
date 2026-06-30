@@ -308,9 +308,14 @@ With TCP in place, build the first services:
   Ethernet frame, so a SYN-ACK padded to the 60-byte frame minimum failed its
   checksum and was dropped, stalling every off-subnet handshake; segments are now
   trimmed to the IP total-length.
-- ⏳ **DHCP client** — DHCPDISCOVER/DHCPOFFER/DHCPREQUEST on boot; configure
-  IP, netmask, GW, DNS dynamically (QEMU SLIRP responds). (Static config works
-  today; DHCP would replace the hardcoded addresses.)
+- ✅ **DHCP client** — at boot the stack broadcasts DISCOVER → REQUEST and
+  installs the address, netmask, router and DNS from the server's OFFER/ACK
+  (`net/dhcp.zig`); the runtime config (`net.MY_IP`/`GW_IP`/`NETMASK`/`DNS_IP`)
+  is now mutable and `ifconfig` reflects the lease (via `SYS_net_config`). Falls
+  back to the static defaults if no server answers, so the system always comes
+  up. pcap-verified in QEMU: DISCOVER → OFFER (yiaddr 10.0.2.15) → REQUEST → ACK
+  from the SLIRP server at 10.0.2.2, and the kernel logs `[dhcp] bound 10.0.2.15
+  mask 255.255.255.0 gw 10.0.2.2 dns 10.0.2.3`.
 - ⏳ **Minimal HTTP server (`httpd`)** — serve static files from `/var/www/html`
   over TCP port 80; single-threaded (fork per request); useful for demos.
 - ⏳ **SSH-lite** — a tiny custom remote shell protocol over TCP (not full SSH);

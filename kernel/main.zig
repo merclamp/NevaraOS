@@ -79,7 +79,11 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
 
         _ = ata.init();
         pci.init();
-        _ = net.init();
+        if (net.init()) {
+            // Obtain an address by DHCP (polled PIO; IRQs are still masked here).
+            // Falls back to the static config if no server answers.
+            _ = net.dhcp.configure();
+        }
         // Enable IRQ11 (RTL8139 on PCI INTA via slot 3 in QEMU's default routing).
         pic.unmask(11);
         // If GRUB loaded rootfs.ext4 as a Multiboot2 module (module2 in grub.cfg),

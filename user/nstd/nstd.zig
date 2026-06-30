@@ -49,6 +49,7 @@ const SYS_net_send: usize = 1011;
 const SYS_net_recv: usize = 1012;
 const SYS_net_info:  usize = 1013;
 const SYS_net_resolve: usize = 1023;
+const SYS_net_config:  usize = 1024;
 // TCP syscalls
 const SYS_tcp_open:    usize = 1014;
 const SYS_tcp_connect: usize = 1015;
@@ -304,6 +305,12 @@ pub fn netInfo(buf: []u8) isize {
 /// success, -1 on failure.
 pub fn resolve(name: [*:0]const u8, out: *[4]u8) isize {
     return @bitCast(syscall3(SYS_net_resolve, @intFromPtr(name), @intFromPtr(out), 0));
+}
+
+/// netConfig(out): write the current network config as 16 bytes —
+/// ip[4], gateway[4], netmask[4], dns[4]. Returns 0 or -1 (no net).
+pub fn netConfig(out: *[16]u8) isize {
+    return @bitCast(syscall1(SYS_net_config, @intFromPtr(out)));
 }
 
 /// ttyMode(1) switches stdin to raw (byte-by-byte, no echo); 0 restores canonical.

@@ -2826,18 +2826,23 @@ fn appletPing() void {
 
 // ---- ifconfig --------------------------------------------------------------
 fn appletIfconfig() void {
-    var buf: [64]u8 = undefined;
-    const r = nstd.netInfo(&buf);
-    if (r < 0) {
+    var cfg: [16]u8 = undefined;
+    if (nstd.netConfig(&cfg) < 0) {
         nstd.print("ifconfig: no network interface\n");
         return;
     }
-    nstd.print("eth0:\n");
-    nstd.print("  inet ");
-    const ip_str: [*:0]const u8 = @ptrCast(&buf);
-    nstd.print(nstd.span(ip_str));
-    nstd.print("  netmask 255.255.255.0\n");
-    nstd.print("  gateway 10.0.2.2\n");
+    const ip4 = struct {
+        fn at(c: []const u8) [4]u8 { return .{ c[0], c[1], c[2], c[3] }; }
+    }.at;
+    nstd.print("eth0:\n  inet ");
+    printIp(ip4(cfg[0..4]));
+    nstd.print("  netmask ");
+    printIp(ip4(cfg[8..12]));
+    nstd.print("\n  gateway ");
+    printIp(ip4(cfg[4..8]));
+    nstd.print("  dns ");
+    printIp(ip4(cfg[12..16]));
+    nstd.print("\n");
 }
 
 // ---- DNS / HTTP helpers -----------------------------------------------------

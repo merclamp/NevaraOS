@@ -69,6 +69,7 @@ const SYS_net_send:  usize = 1011; // udpSend(dst_ip_ptr, sport, dport, buf_ptr,
 const SYS_net_recv:  usize = 1012; // udpRecv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr)
 const SYS_net_info:  usize = 1013;
 const SYS_net_resolve: usize = 1023; // resolve(name_ptr, ip_out_ptr) -> 0 ok / -1 fail
+const SYS_net_config:  usize = 1024; // net_config(out_ptr) -> writes ip/gw/mask/dns (16 bytes)
 // TCP socket syscalls (1014-1020 range)
 const SYS_tcp_open:    usize = 1014; // () -> sock_idx or -1
 const SYS_tcp_connect: usize = 1015; // (sock, ip_ptr, port, src_port) -> 0 ok/-1
@@ -545,15 +546,31 @@ fn sysNetRecv(buf_ptr: usize, len: usize, src_ip_ptr: usize, sport_ptr: usize, d
     return @intCast(n);
 }
 
-// SYS_net_info(buf_ptr, len) -> 0 ok, -1 no net
+// SYS_net_info(buf_ptr, len) -> 0 ok, -1 no net. Writes our current IP as a
+// dotted-decimal string (reflects the DHCP lease, not a hardcoded address).
 fn sysNetInfo(buf_ptr: usize, len: usize) isize {
     if (!net.isReady()) return -1;
     const buf: [*]u8 = @ptrFromInt(buf_ptr);
-    // Write 10.0.2.15 + NUL
-    const info = "10.0.2.15";
-    const n = @min(info.len, len - 1);
-    @memcpy(buf[0..n], info[0..n]);
-    buf[n] = 0;
+    var pos: usize = 0;
+    var nb: [10]u8 = undefined;
+    for (net.MY_IP, 0..) |o, i| {
+        if (i != 0) pos = appendBuf(buf, pos, len, ".");
+        pos = appendBuf(buf, pos, len, fmtU32Dec(@as(u32, o), &nb));
+    }
+    if (pos < len) buf[pos] = 0;
+    return 0;
+}
+
+// SYS_net_config(out_ptr) -> 0 ok, -1 no net. Writes 16 raw bytes:
+// ip[4], gateway[4], netmask[4], dns[4] (current runtime config).
+fn sysNetConfig(out_ptr: usize) isize {
+    if (!net.isReady()) return -1;
+    if (out_ptr == 0) return -EINVAL;
+    const out: [*]u8 = @ptrFromInt(out_ptr);
+    @memcpy(out[0..4], &net.MY_IP);
+    @memcpy(out[4..8], &net.GW_IP);
+    @memcpy(out[8..12], &net.NETMASK);
+    @memcpy(out[12..16], &net.DNS_IP);
     return 0;
 }
 
@@ -863,6 +880,7 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_net_recv  => sysNetRecv(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_info  => sysNetInfo(a1, a2),
         SYS_net_resolve => sysNetResolve(a1, a2),
+        SYS_net_config  => sysNetConfig(a1),
         SYS_tcp_open    => sysTcpOpen(),
         SYS_tcp_connect => sysTcpConnect(a1, a2, a3, tf.r10),
         SYS_tcp_listen  => sysTcpListen(a1, a2),

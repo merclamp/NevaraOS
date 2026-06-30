@@ -15,11 +15,20 @@ const pit     = @import("../arch/x86_64/pit.zig");
 
 // ---- Config ----------------------------------------------------------------
 
-pub const MY_IP:  [4]u8 = .{ 10, 0, 2, 15 };
-pub const GW_IP:  [4]u8 = .{ 10, 0, 2,  2 };
-pub const NETMASK:[4]u8 = .{ 255, 255, 255, 0 };
-pub const DNS_IP: [4]u8 = .{ 10, 0, 2,  3 };
+// Runtime network configuration. These start as sane QEMU-SLIRP defaults (so
+// the stack works even if DHCP fails) and are overwritten by applyConfig() once
+// a DHCP lease is obtained at boot.
+pub var MY_IP:  [4]u8 = .{ 10, 0, 2, 15 };
+pub var GW_IP:  [4]u8 = .{ 10, 0, 2,  2 };
+pub var NETMASK:[4]u8 = .{ 255, 255, 255, 0 };
+pub var DNS_IP: [4]u8 = .{ 10, 0, 2,  3 };
 
+// When true, the IPv4 receive path accepts datagrams regardless of destination
+// address. The DHCP client sets this during a lease negotiation (its replies
+// are addressed to the not-yet-assigned offered IP or to the broadcast addr).
+pub var accept_all: bool = false;
+
+const BROADCAST_IP:  [4]u8 = .{ 255, 255, 255, 255 };
 const BROADCAST_MAC: [6]u8 = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 const ZERO_MAC:      [6]u8 = .{ 0, 0, 0, 0, 0, 0 };
 
@@ -306,6 +315,59 @@ pub fn udpSend(dst_ip: [4]u8, src_port: u16, dst_port: u16, payload: []const u8)
     rtl.sendFrame(tx_frame[0 .. ETH_HDR + IPV4_HDR + udp_total]);
 }
 
+/// Send a UDP datagram with explicit source/destination addresses and a chosen
+/// destination MAC (no ARP). Used by the DHCP client, which must send from
+/// 0.0.0.0 to the 255.255.255.255 broadcast before it has an address or knows
+/// the server's MAC.
+pub fn sendUdpRaw(
+    src_ip:   [4]u8,
+    dst_ip:   [4]u8,
+    dst_mac:  [6]u8,
+    src_port: u16,
+    dst_port: u16,
+    payload:  []const u8,
+) void {
+    if (!rtl.isReady()) return;
+    const payload_len = @min(payload.len, UDP_PKT_MAX);
+    const udp_total = UDP_HDR + payload_len;
+
+    _ = buildEthHdr(dst_mac, ETH_IPV4, IPV4_HDR + udp_total);
+
+    const p = ETH_HDR;
+    tx_frame[p + 0] = 0x45;
+    tx_frame[p + 1] = 0;
+    writeU16be(&tx_frame, p + 2, @intCast(IPV4_HDR + udp_total));
+    writeU16be(&tx_frame, p + 4, ip_id);
+    ip_id +%= 1;
+    writeU16be(&tx_frame, p + 6, 0);
+    tx_frame[p + 8] = 64;
+    tx_frame[p + 9] = PROTO_UDP;
+    writeU16be(&tx_frame, p + 10, 0);
+    @memcpy(tx_frame[p + 12 .. p + 16], &src_ip);
+    @memcpy(tx_frame[p + 16 .. p + 20], &dst_ip);
+    const csum = ipChecksum(tx_frame[p .. p + IPV4_HDR]);
+    writeU16be(&tx_frame, p + 10, csum);
+
+    const r = ETH_HDR + IPV4_HDR;
+    writeU16be(&tx_frame, r, src_port);
+    writeU16be(&tx_frame, r + 2, dst_port);
+    writeU16be(&tx_frame, r + 4, @intCast(udp_total));
+    writeU16be(&tx_frame, r + 6, 0); // checksum optional for IPv4 UDP
+    @memcpy(tx_frame[r + UDP_HDR .. r + UDP_HDR + payload_len], payload[0..payload_len]);
+
+    rtl.sendFrame(tx_frame[0 .. ETH_HDR + IPV4_HDR + udp_total]);
+}
+
+/// Install a network configuration (called by the DHCP client on lease grant).
+pub fn applyConfig(ip: [4]u8, mask: [4]u8, gw: [4]u8, dns_ip: [4]u8) void {
+    MY_IP = ip;
+    NETMASK = mask;
+    GW_IP = gw;
+    DNS_IP = dns_ip;
+}
+
+pub fn macAddr() [6]u8 { return my_mac; }
+
 // ---- ICMP ping (send echo request, wait for reply) -------------------------
 
 pub const PingResult = enum { ok, timeout, unreachable_no_arp };
@@ -412,8 +474,11 @@ fn handleIPv4(data: []const u8) void {
     @memcpy(&src_mac, data[6..12]);
     arpCacheStore(src_ip, src_mac);
 
-    // Only process packets addressed to us.
-    if (@as(u32, @bitCast(dst_ip)) != @as(u32, @bitCast(MY_IP))) return;
+    // Only process packets addressed to us (or broadcast, or anything while a
+    // DHCP negotiation is in flight — see `accept_all`).
+    if (!accept_all and
+        @as(u32, @bitCast(dst_ip)) != @as(u32, @bitCast(MY_IP)) and
+        @as(u32, @bitCast(dst_ip)) != @as(u32, @bitCast(BROADCAST_IP))) return;
 
     switch (proto) {
         PROTO_ICMP => {
@@ -517,6 +582,7 @@ fn tcpPseudoChecksum(src_ip: [4]u8, dst_ip: [4]u8, seg: []const u8) u16 {
 // ---- Re-export tcp_mod for syscall layer ------------------------------------
 pub const tcp = tcp_mod;
 pub const dns = @import("dns.zig");
+pub const dhcp = @import("dhcp.zig");
 
 // ---- Public init -----------------------------------------------------------
 
@@ -524,7 +590,7 @@ pub fn init() bool {
     if (!rtl.init()) return false;
     my_mac = rtl.macAddr();
     rtl.on_receive = onReceive;
-    console.writeString("[net] stack ready — IP 10.0.2.15/24, GW 10.0.2.2\n");
+    console.writeString("[net] stack ready (rtl8139); requesting DHCP lease\n");
     return true;
 }
 
