@@ -69,7 +69,8 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   `uname` `nevfetch` `chmod` `chown` `find` `stat` `strings` `fold` `comm` `printf`
   `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
   `whoami` `id` `su` `useradd` `userdel` `passwd`
-  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear` `kill` `sigtest` `dactest` `vmtest`
+  `ping` `ifconfig` `nslookup` `httpget` `zinit-ctl` `reboot` `poweroff` `clear`
+  `kill` `sigtest` `dactest` `vmtest`
   — all in one multi-call binary, no libc.
 
 ## Current status
@@ -129,13 +130,15 @@ Twelve foundational stages are done and verified in QEMU:
   for user home dirs; `useradd`/`userdel`/`su`/`whoami`/`id` applets;
   `getuid`/`setuid`/`getgid`/`setgid` and custom `useradd`/`userdel`/
   `getpwnam` syscalls; **nsh** prompt shows `user@nevara:path` with colour.
-- ✅ **Networking (end-to-end verified)** — PCI scanner, RTL8139 driver
-  (IRQ-driven RX, 32-bit DMA via `pmm.allocLow32`), Ethernet/ARP/IPv4/ICMP/UDP
-  stack; static IP 10.0.2.15/24, GW 10.0.2.2 (QEMU SLIRP). `ping` and
-  `ifconfig` NevBox applets; `net_ping`/`net_send`/`net_recv`/`net_info`
-  syscalls. End-to-end verified: `ping -c 3 10.0.2.2` → 3/3 received, ARP
-  cache populated, IRQ11 routing confirmed. `zig build run` adds
-  `-netdev user -device rtl8139` to QEMU automatically.
+- ✅ **Networking — real internet access** — PCI scanner, RTL8139 driver
+  (IRQ-driven RX, 32-bit DMA via `pmm.allocLow32`), Ethernet/ARP/IPv4/ICMP/UDP/TCP
+  stack with gateway routing for off-subnet hosts; static IP 10.0.2.15/24,
+  GW 10.0.2.2, DNS 10.0.2.3 (QEMU SLIRP). A DNS A-record resolver lets the system
+  reach hosts by name. NevBox `ping`/`ifconfig`/`nslookup`/`httpget`. **Verified
+  end-to-end:** `ping -c 3 10.0.2.2` → 3/3, and `httpget http://example.com/`
+  resolves DNS, connects through the gateway, and prints the live
+  `HTTP/1.1 200 OK` page. `zig build run` adds `-netdev user -device rtl8139` to
+  QEMU automatically.
 
 
 ## Roadmap
@@ -293,12 +296,21 @@ ZInit is now a real supervisor instead of a getty exec-loop:
 
 With TCP in place, build the first services:
 
+- ✅ **Internet access (DNS + HTTP client)** — the IP layer already routes
+  off-subnet traffic through the gateway; adding a DNS resolver makes the system
+  reach hosts by name. A minimal A-record resolver (`SYS_net_resolve`, kernel
+  `net/dns.zig`) queries `10.0.2.3:53` over UDP and parses the reply (compression
+  pointers handled, bounds-checked). NevBox gains `nslookup` and **`httpget`**
+  (`httpget <url>` → DNS → TCP connect → HTTP/1.0 GET → print response; no TLS).
+  Verified end-to-end in QEMU: `httpget http://example.com/` resolves the name,
+  connects through the SLIRP gateway, and prints the live `HTTP/1.1 200 OK` page.
+  This also fixed a real TCP bug — incoming segments were taken to the end of the
+  Ethernet frame, so a SYN-ACK padded to the 60-byte frame minimum failed its
+  checksum and was dropped, stalling every off-subnet handshake; segments are now
+  trimmed to the IP total-length.
 - ⏳ **DHCP client** — DHCPDISCOVER/DHCPOFFER/DHCPREQUEST on boot; configure
-  IP, netmask, GW, DNS dynamically (QEMU SLIRP responds).
-- ⏳ **DNS resolver** — simple iterative resolver; cache up to 64 RRs; expose
-  as `getaddrinfo()` stub in ZLibc.
-- ⏳ **HTTP client (`httpget`)** — NevBox applet: `httpget <url>` → TCP connect
-  → raw HTTP/1.0 GET → print body; no TLS in this phase.
+  IP, netmask, GW, DNS dynamically (QEMU SLIRP responds). (Static config works
+  today; DHCP would replace the hardcoded addresses.)
 - ⏳ **Minimal HTTP server (`httpd`)** — serve static files from `/var/www/html`
   over TCP port 80; single-threaded (fork per request); useful for demos.
 - ⏳ **SSH-lite** — a tiny custom remote shell protocol over TCP (not full SSH);

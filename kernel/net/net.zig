@@ -18,6 +18,7 @@ const pit     = @import("../arch/x86_64/pit.zig");
 pub const MY_IP:  [4]u8 = .{ 10, 0, 2, 15 };
 pub const GW_IP:  [4]u8 = .{ 10, 0, 2,  2 };
 pub const NETMASK:[4]u8 = .{ 255, 255, 255, 0 };
+pub const DNS_IP: [4]u8 = .{ 10, 0, 2,  3 };
 
 const BROADCAST_MAC: [6]u8 = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 const ZERO_MAC:      [6]u8 = .{ 0, 0, 0, 0, 0, 0 };
@@ -515,6 +516,7 @@ fn tcpPseudoChecksum(src_ip: [4]u8, dst_ip: [4]u8, seg: []const u8) u16 {
 
 // ---- Re-export tcp_mod for syscall layer ------------------------------------
 pub const tcp = tcp_mod;
+pub const dns = @import("dns.zig");
 
 // ---- Public init -----------------------------------------------------------
 

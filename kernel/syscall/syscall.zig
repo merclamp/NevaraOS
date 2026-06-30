@@ -68,6 +68,7 @@ const SYS_net_ping:  usize = 1010; // ping(ip_ptr, timeout_ms) -> 0=ok, -1=timeo
 const SYS_net_send:  usize = 1011; // udpSend(dst_ip_ptr, sport, dport, buf_ptr, len)
 const SYS_net_recv:  usize = 1012; // udpRecv(buf_ptr, len, src_ip_ptr, sport_ptr, dport_ptr)
 const SYS_net_info:  usize = 1013;
+const SYS_net_resolve: usize = 1023; // resolve(name_ptr, ip_out_ptr) -> 0 ok / -1 fail
 // TCP socket syscalls (1014-1020 range)
 const SYS_tcp_open:    usize = 1014; // () -> sock_idx or -1
 const SYS_tcp_connect: usize = 1015; // (sock, ip_ptr, port, src_port) -> 0 ok/-1
@@ -559,6 +560,15 @@ fn sysNetInfo(buf_ptr: usize, len: usize) isize {
 
 fn sysTtyMode(mode: usize) isize { tty.raw_mode = (mode != 0); return 0; }
 
+// SYS_net_resolve(name_ptr, ip_out_ptr) -> 0 ok / -1 fail. Resolves a hostname
+// to an IPv4 address via DNS and writes 4 bytes to ip_out_ptr.
+fn sysNetResolve(name_ptr: usize, ip_out_ptr: usize) isize {
+    var ip: [4]u8 = undefined;
+    if (!net.dns.resolve(cstr(name_ptr), &ip)) return -1;
+    if (ip_out_ptr != 0) @as(*[4]u8, @ptrFromInt(ip_out_ptr)).* = ip;
+    return 0;
+}
+
 /// Central dispatcher, invoked from the SYSCALL handler with a saved trap frame.
 /// Returns the value to place in the caller's rax (exit/execve do not return).
 fn sysUnlink(path_ptr: usize) isize {
@@ -852,6 +862,7 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_net_send  => sysNetSend(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_recv  => sysNetRecv(a1, a2, a3, tf.r10, tf.r8),
         SYS_net_info  => sysNetInfo(a1, a2),
+        SYS_net_resolve => sysNetResolve(a1, a2),
         SYS_tcp_open    => sysTcpOpen(),
         SYS_tcp_connect => sysTcpConnect(a1, a2, a3, tf.r10),
         SYS_tcp_listen  => sysTcpListen(a1, a2),
@@ -879,9 +890,11 @@ fn sysTcpConnect(sock: usize, ip_ptr: usize, port: usize, src_port: usize) isize
         @intCast(sock), ip.*, @intCast(port), @intCast(src_port),
     );
     if (!ok) return -EINVAL;
-    // Poll until connected or timeout (~3s).
+    // Poll until connected or timeout. A connect to a real internet host goes
+    // out through the SLIRP gateway, which must open the upstream socket before
+    // the SYN-ACK returns, so allow a generous budget (~6 s at ~50k polls/s).
     var i: usize = 0;
-    while (i < 3_000_000) : (i += 100) {
+    while (i < 30_000_000) : (i += 100) {
         rtl8139.pollRx();
         if (net.tcp.isConnected(@intCast(sock))) return 0;
         if (net.tcp.isClosed(@intCast(sock))) return -EINVAL;

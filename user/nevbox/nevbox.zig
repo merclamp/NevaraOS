@@ -102,6 +102,8 @@ pub fn main() void {
     else if (eq(cmd, "passwd"))   appletPasswd()
     else if (eq(cmd, "ping"))     appletPing()
     else if (eq(cmd, "ifconfig")) appletIfconfig()
+    else if (eq(cmd, "nslookup")) appletNslookup()
+    else if (eq(cmd, "httpget"))  appletHttpget()
     else if (eq(cmd, "clear"))    appletClear()
     else if (eq(cmd, "zinit-ctl")) appletZinitCtl()
     else if (eq(cmd, "reboot"))   appletReboot()
@@ -118,7 +120,7 @@ pub fn main() void {
                     "find stat strings fold comm printf which xargs " ++
                     "ln env dd od nl du " ++
                     "whoami id su useradd userdel passwd " ++
-                    "ping ifconfig clear zinit-ctl reboot poweroff " ++
+                    "ping ifconfig nslookup httpget clear zinit-ctl reboot poweroff " ++
                     "kill sigtest dactest vmtest\n");
 
 }
@@ -2836,5 +2838,169 @@ fn appletIfconfig() void {
     nstd.print(nstd.span(ip_str));
     nstd.print("  netmask 255.255.255.0\n");
     nstd.print("  gateway 10.0.2.2\n");
+}
+
+// ---- DNS / HTTP helpers -----------------------------------------------------
+
+fn printIp(ip: [4]u8) void {
+    for (ip, 0..) |o, i| {
+        if (i != 0) nstd.print(".");
+        nstd.printDec(o);
+    }
+}
+
+/// Parse a dotted-decimal IPv4 literal. Returns false if `s` isn't one.
+fn parseDottedIp(s: []const u8, out: *[4]u8) bool {
+    var octet: usize = 0;
+    var acc: usize = 0;
+    var any: bool = false;
+    for (s) |c| {
+        if (c == '.') {
+            if (octet >= 3 or !any) return false;
+            out[octet] = @intCast(acc & 0xFF);
+            octet += 1;
+            acc = 0;
+            any = false;
+        } else if (c >= '0' and c <= '9') {
+            acc = acc * 10 + (c - '0');
+            any = true;
+        } else return false;
+    }
+    if (octet != 3 or !any) return false;
+    out[3] = @intCast(acc & 0xFF);
+    return true;
+}
+
+/// Copy `s` into `dst` as a null-terminated C string. Returns the pointer.
+fn cstrInto(dst: []u8, s: []const u8) [*:0]const u8 {
+    const n = @min(s.len, dst.len - 1);
+    @memcpy(dst[0..n], s[0..n]);
+    dst[n] = 0;
+    return @ptrCast(dst.ptr);
+}
+
+/// Resolve `host` (literal IP or hostname) to an address, printing diagnostics.
+fn resolveHost(host: []const u8, out: *[4]u8) bool {
+    if (parseDottedIp(host, out)) return true;
+    var zbuf: [256]u8 = undefined;
+    if (nstd.resolve(cstrInto(&zbuf, host), out) < 0) return false;
+    return true;
+}
+
+// ---- nslookup --------------------------------------------------------------
+
+fn appletNslookup() void {
+    const name = nstd.arg(1) orelse {
+        nstd.print("usage: nslookup <hostname>\n");
+        return;
+    };
+    var ip: [4]u8 = undefined;
+    if (!resolveHost(name, &ip)) {
+        nstd.print("nslookup: can't resolve '");
+        nstd.print(name);
+        nstd.print("'\n");
+        return;
+    }
+    nstd.print("Name:    ");
+    nstd.print(name);
+    nstd.print("\nAddress: ");
+    printIp(ip);
+    nstd.print("\n");
+}
+
+// ---- httpget ---------------------------------------------------------------
+// httpget <url>  — HTTP/1.0 GET over plain TCP (no TLS). Resolves the host via
+// DNS, connects through the gateway, prints the raw response.
+
+fn appletHttpget() void {
+    const url = nstd.arg(1) orelse {
+        nstd.print("usage: httpget <url>   e.g. httpget http://example.com/\n");
+        return;
+    };
+
+    // Strip an optional scheme.
+    var rest = url;
+    if (std.mem.startsWith(u8, rest, "http://")) {
+        rest = rest[7..];
+    } else if (std.mem.startsWith(u8, rest, "https://")) {
+        nstd.print("httpget: https (TLS) is not supported\n");
+        return;
+    }
+
+    // Split host[:port] from the path.
+    var hostport = rest;
+    var path: []const u8 = "/";
+    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+        hostport = rest[0..slash];
+        path = rest[slash..];
+    }
+
+    // Split an optional :port.
+    var host = hostport;
+    var port: u16 = 80;
+    if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
+        host = hostport[0..colon];
+        port = @intCast(parseNat(hostport[colon + 1 ..]) orelse 80);
+    }
+    if (host.len == 0) { nstd.print("httpget: empty host\n"); return; }
+
+    var ip: [4]u8 = undefined;
+    if (!resolveHost(host, &ip)) {
+        nstd.print("httpget: cannot resolve '");
+        nstd.print(host);
+        nstd.print("'\n");
+        return;
+    }
+    nstd.print("* ");
+    nstd.print(host);
+    nstd.print(" -> ");
+    printIp(ip);
+    nstd.print(" :");
+    nstd.printDec(port);
+    nstd.print("\n");
+
+    const sock_raw = nstd.tcpOpen();
+    if (sock_raw < 0) { nstd.print("httpget: no socket\n"); return; }
+    const sock: usize = @intCast(sock_raw);
+
+    if (nstd.tcpConnect(sock, ip, port, 49152) < 0) {
+        nstd.print("httpget: connect failed\n");
+        nstd.tcpClose(sock);
+        return;
+    }
+
+    // Build "GET <path> HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n".
+    var req: [600]u8 = undefined;
+    var n: usize = 0;
+    const put = struct {
+        fn s(buf: []u8, pos: *usize, str: []const u8) void {
+            const c = @min(str.len, buf.len - pos.*);
+            @memcpy(buf[pos.* .. pos.* + c], str[0..c]);
+            pos.* += c;
+        }
+    }.s;
+    put(&req, &n, "GET ");
+    put(&req, &n, path);
+    put(&req, &n, " HTTP/1.0\r\nHost: ");
+    put(&req, &n, host);
+    put(&req, &n, "\r\nUser-Agent: nevbox\r\nConnection: close\r\n\r\n");
+    _ = nstd.tcpSend(sock, req[0..n]);
+
+    // Drain the response until the peer closes.
+    var buf: [1024]u8 = undefined;
+    var idle: usize = 0;
+    while (true) {
+        const got = nstd.tcpRecv(sock, &buf);
+        if (got > 0) {
+            _ = nstd.write(1, buf[0..@intCast(got)]);
+            idle = 0;
+            continue;
+        }
+        if (nstd.tcpStatus(sock) == 2) break; // connection closed
+        idle += 1;
+        if (idle > 2_000_000) { nstd.print("\nhttpget: timeout\n"); break; }
+    }
+    nstd.tcpClose(sock);
+    nstd.print("\n");
 }
 

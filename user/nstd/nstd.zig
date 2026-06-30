@@ -48,6 +48,7 @@ const SYS_net_ping: usize = 1010;
 const SYS_net_send: usize = 1011;
 const SYS_net_recv: usize = 1012;
 const SYS_net_info:  usize = 1013;
+const SYS_net_resolve: usize = 1023;
 // TCP syscalls
 const SYS_tcp_open:    usize = 1014;
 const SYS_tcp_connect: usize = 1015;
@@ -297,6 +298,12 @@ pub fn netRecv(buf: []u8, src_ip: *[4]u8, src_port: *u16, dst_port: *u16) usize 
 /// netInfo(buf): write IP address string into buf. Returns 0 or -1 (no net).
 pub fn netInfo(buf: []u8) isize {
     return @bitCast(syscall3(SYS_net_info, @intFromPtr(buf.ptr), buf.len, 0));
+}
+
+/// resolve(name): DNS-resolve a hostname into `out` (4 bytes). Returns 0 on
+/// success, -1 on failure.
+pub fn resolve(name: [*:0]const u8, out: *[4]u8) isize {
+    return @bitCast(syscall3(SYS_net_resolve, @intFromPtr(name), @intFromPtr(out), 0));
 }
 
 /// ttyMode(1) switches stdin to raw (byte-by-byte, no echo); 0 restores canonical.

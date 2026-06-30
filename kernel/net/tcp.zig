@@ -303,7 +303,16 @@ pub fn handleSegment(
     const base = 14 + 20; // ETH + IP
     if (data.len < base + 20) return;
 
-    const tcp = data[base..];
+    // Trim to the IP total-length. Otherwise Ethernet zero-padding (frames are
+    // padded to a 60-byte minimum, so a bare 54-byte SYN-ACK carries 6 trailing
+    // pad bytes) is mistaken for TCP payload — which corrupts the checksum
+    // (causing valid segments to be dropped) and the payload length.
+    const ip_total = readU16(data, 16);
+    var seg_end: usize = 14 + ip_total;
+    if (seg_end > data.len) seg_end = data.len;
+    if (seg_end < base + 20) return;
+
+    const tcp = data[base..seg_end];
     const src_port  = readU16(tcp, 0);
     const dst_port  = readU16(tcp, 2);
     const seq_num   = readU32(tcp, 4);
@@ -312,8 +321,8 @@ pub fn handleSegment(
     const flags: u8 = tcp[13];
     // const window = readU16(tcp, 14);
 
-    if (data_off < 20 or base + data_off > data.len) return;
-    const payload = data[base + data_off ..];
+    if (data_off < 20 or base + data_off > seg_end) return;
+    const payload = data[base + data_off .. seg_end];
 
     // Verify checksum.
     const csum = readU16(tcp, 16);

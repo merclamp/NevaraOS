@@ -243,7 +243,7 @@ pub fn build(b: *std.Build) void {
         \\           yes basename dirname rm mv sleep chmod \
         \\           find stat strings fold comm printf which xargs ln env dd od nl du \
         \\           whoami id su useradd userdel passwd chown \
-        \\           ping ifconfig clear zinit-ctl reboot poweroff \
+        \\           ping ifconfig nslookup httpget clear zinit-ctl reboot poweroff \
         \\           kill sigtest dactest vmtest; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
