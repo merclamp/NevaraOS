@@ -25,6 +25,9 @@ const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
 const SYS_rmdir:  usize = 84;
 const SYS_chmod:   usize = 90;
+const SYS_fchmod:  usize = 91;
+const SYS_chown:   usize = 92;
+const SYS_statp:   usize = 1030;
 const SYS_getuid:  usize = 102;
 const SYS_getgid:  usize = 104;
 const SYS_setuid:  usize = 105;
@@ -161,6 +164,25 @@ pub fn renameFile(old: [*:0]const u8, new: [*:0]const u8) isize {
 /// chmod(): change file permissions. Returns 0 on success, negative errno.
 pub fn chmodFile(path: [*:0]const u8, mode: usize) isize {
     return @bitCast(syscall3(SYS_chmod, @intFromPtr(path), mode, 0));
+}
+
+/// fchmod(): change permissions of an open fd. Returns 0 or negative errno.
+pub fn fchmod(fd: usize, mode: usize) isize {
+    return @bitCast(syscall3(SYS_fchmod, fd, mode, 0));
+}
+
+/// chown(): change a file's owner. uid/gid of 0xFFFF_FFFF leaves a field as-is.
+/// Root only. Returns 0 or negative errno.
+pub fn chown(path: [*:0]const u8, uid: u32, gid: u32) isize {
+    return @bitCast(syscall3(SYS_chown, @intFromPtr(path), uid, gid));
+}
+
+/// Compact stat result: full mode word, owner uid/gid, and size.
+pub const Stat = extern struct { mode: u32, uid: u32, gid: u32, size: u32 };
+
+/// stat(): fill `out` with a file's mode/uid/gid/size. Returns 0 or neg errno.
+pub fn stat(path: [*:0]const u8, out: *Stat) isize {
+    return @bitCast(syscall3(SYS_statp, @intFromPtr(path), @intFromPtr(out), 0));
 }
 /// getuid(): real user id of the current process.
 pub fn getuid() u32 { return @truncate(syscall1(SYS_getuid, 0)); }

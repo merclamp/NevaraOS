@@ -346,8 +346,17 @@ fn nowSecs() u32 { return @truncate(pit.jiffies / 100); }
 
 fn setInoAtime(v: u32) void { wU32(&inobuf,  8, v); }
 fn setInoMtime(v: u32) void { wU32(&inobuf, 16, v); }
-fn setInoCtime(v: u32) void { wU32(&inobuf, 24, v); }
+// i_ctime lives at 0x0C. (It was previously written to 0x18, which is i_gid —
+// that silently clobbered the group owner on every chmod/write.)
+fn setInoCtime(v: u32) void { wU32(&inobuf, 12, v); }
 fn inoModeFull() u16   { return rU16(&inobuf, 0); }
+
+// Owner fields: i_uid at 0x02, i_gid at 0x18, with the high halves in the
+// Linux osd2 area (l_i_uid_high at 0x78, l_i_gid_high at 0x7A).
+fn inoUid() u32 { return @as(u32, rU16(&inobuf, 2)) | (@as(u32, rU16(&inobuf, 120)) << 16); }
+fn inoGid() u32 { return @as(u32, rU16(&inobuf, 24)) | (@as(u32, rU16(&inobuf, 122)) << 16); }
+fn setInoUid(v: u32) void { wU16(&inobuf, 2, @truncate(v)); wU16(&inobuf, 120, @truncate(v >> 16)); }
+fn setInoGid(v: u32) void { wU16(&inobuf, 24, @truncate(v)); wU16(&inobuf, 122, @truncate(v >> 16)); }
 
 pub fn isDirMode(mode: u16) bool { return (mode & 0xF000) == 0x4000; }
 
@@ -1041,6 +1050,27 @@ pub fn getMode(ino: u32) u16 {
     defer irqRestore(irq);
     if (!mounted or !readInode(ino)) return 0;
     return inoModeFull();
+}
+
+pub const Owner = struct { uid: u32, gid: u32, mode: u16 };
+
+/// One-shot read of an inode's owner uid/gid and full mode word.
+pub fn statOwner(ino: u32) Owner {
+    const irq = irqSave();
+    defer irqRestore(irq);
+    if (!mounted or !readInode(ino)) return .{ .uid = 0, .gid = 0, .mode = 0 };
+    return .{ .uid = inoUid(), .gid = inoGid(), .mode = inoModeFull() };
+}
+
+/// Change the owner uid/gid of inode `ino`. Returns true on success.
+pub fn chown(ino: u32, uid: u32, gid: u32) bool {
+    const irq = irqSave();
+    defer irqRestore(irq);
+    if (!mounted or !readInode(ino)) return false;
+    setInoUid(uid);
+    setInoGid(gid);
+    setInoCtime(nowSecs());
+    return writeInode(ino);
 }
 
 pub fn sizeOf(ino: u32) u32 {

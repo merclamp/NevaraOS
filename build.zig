@@ -242,11 +242,12 @@ pub fn build(b: *std.Build) void {
         \\           true false uptime uname nevfetch sort uniq cut tr rev pwd \
         \\           yes basename dirname rm mv sleep chmod \
         \\           find stat strings fold comm printf which xargs ln env dd od nl du \
-        \\           whoami id su useradd userdel passwd \
+        \\           whoami id su useradd userdel passwd chown \
         \\           ping ifconfig clear zinit-ctl reboot poweroff \
-        \\           kill sigtest; do
+        \\           kill sigtest dactest; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
+        \\chmod 0755 "$ROOTFS/bin/"*
         \\printf 'nevara\n'                            > "$ROOTFS/etc/hostname"
         \\cat > "$ROOTFS/etc/zinit.conf" <<'EOF'
         \\# /etc/zinit.conf — Nevara init service table.

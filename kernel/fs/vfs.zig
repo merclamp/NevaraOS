@@ -78,6 +78,13 @@ pub const Node = struct {
     // Anonymous pipe.
     pipe: ?*Pipe = null,
 
+    // Ownership + permission bits (low 12 of a Unix mode word; the file-type
+    // bits are derived from `kind`). For ext4-backed nodes these are loaded from
+    // the inode at populate time and written back on chmod/chown.
+    uid: u32 = 0,
+    gid: u32 = 0,
+    mode: u16 = 0o644,
+
     // Synthetic (procfs/sysfs) read-only file: `gen` produces the full content
     // on demand. `gen_arg` carries an opaque parameter (e.g. a pid) to the
     // generator so one function can back many per-object files.
@@ -124,6 +131,10 @@ fn populateExt(dirnode: *Node, ino: u32) void {
         const node = makeNode(kind, e.name[0..e.name_len]) catch return;
         node.on_ext = true;
         node.ext_ino = e.ino;
+        const own = ext4.statOwner(e.ino);
+        node.uid = own.uid;
+        node.gid = own.gid;
+        if ((own.mode & 0o7777) != 0) node.mode = own.mode & 0o7777;
         if (!e.is_dir) node.size = ext4.sizeOf(e.ino);
         addChild(dirnode, node) catch return;
         if (e.is_dir) populateExt(node, e.ino);
@@ -147,9 +158,18 @@ fn dupName(s: []const u8) Error![]u8 {
     return m;
 }
 
+fn defaultMode(kind: Kind) u16 {
+    return switch (kind) {
+        .dir     => 0o755,
+        .chardev => 0o666,
+        .pipe    => 0o600,
+        .file    => 0o644,
+    };
+}
+
 fn makeNode(kind: Kind, name: []const u8) Error!*Node {
     const n = try alloc.create(Node);
-    n.* = .{ .kind = kind, .name = try dupName(name) };
+    n.* = .{ .kind = kind, .name = try dupName(name), .mode = defaultMode(kind) };
     return n;
 }
 
@@ -429,7 +449,7 @@ const console_ops = DevOps{ .read = consoleRead, .write = consoleWrite };
 pub fn init() Error!void {
     alloc = heap.allocator();
     root_node = try alloc.create(Node);
-    root_node.* = .{ .kind = .dir, .name = try dupName("/") };
+    root_node.* = .{ .kind = .dir, .name = try dupName("/"), .mode = 0o755 };
 
     _ = try mkdir("/dev");
     _ = try mkdev("/dev/null",    &null_ops);
@@ -438,20 +458,74 @@ pub fn init() Error!void {
 }
 
 
-/// Change permission bits of the ext4-backed node at `path`.
-pub fn chmod(path: []const u8, mode: u16) Error!void {
-    const node = try resolve(path);
-    if (node.on_ext and node.ext_ino != 0) {
-        if (!ext4.chmod(node.ext_ino, mode)) return Error.NotSupported;
+// ---- DAC: discretionary access control --------------------------------------
+
+// Permission bits for mayAccess().
+pub const R: u8 = 4;
+pub const W: u8 = 2;
+pub const X: u8 = 1;
+
+/// Decide whether a process with effective `euid`/`egid` may access `node` for
+/// the requested `want` (bitwise OR of R/W/X), using classic Unix rwx classes.
+/// uid 0 is privileged: read/write always; execute only if some x bit is set
+/// (or the target is a directory), matching Linux.
+pub fn mayAccess(node: *const Node, euid: u32, egid: u32, want: u8) bool {
+    const m = node.mode;
+    if (euid == 0) {
+        if (want & X == 0) return true;
+        if (node.kind == .dir) return true;
+        return (m & 0o111) != 0;
     }
-    // Pure tmpfs nodes don't have persistent mode bits; silently succeed.
+    const class: u16 = if (euid == node.uid)
+        (m >> 6) & 7
+    else if (egid == node.gid)
+        (m >> 3) & 7
+    else
+        m & 7;
+    return (@as(u8, @intCast(class)) & want) == want;
 }
 
-/// Return the full mode word (file type + permission bits) of a node,
-/// read from the on-disk inode.  Returns 0 for tmpfs-only nodes.
+/// Apply new permission bits to a node, persisting to ext4 if backed. Performs
+/// no permission check of its own — the caller (syscall layer) enforces policy.
+pub fn applyChmod(node: *Node, mode: u16) Error!void {
+    node.mode = mode & 0o7777;
+    if (node.on_ext and node.ext_ino != 0) {
+        if (!ext4.chmod(node.ext_ino, node.mode)) return Error.NotSupported;
+    }
+}
+
+/// Change a node's owner uid/gid. A component of 0xFFFF_FFFF leaves that field
+/// unchanged (POSIX -1 semantics). No permission check here.
+pub fn applyChown(node: *Node, uid: u32, gid: u32) Error!void {
+    if (uid != 0xFFFF_FFFF) node.uid = uid;
+    if (gid != 0xFFFF_FFFF) node.gid = gid;
+    if (node.on_ext and node.ext_ino != 0) {
+        if (!ext4.chown(node.ext_ino, node.uid, node.gid)) return Error.NotSupported;
+    }
+}
+
+/// Path-based chmod (used by SYS_chmod). No permission check here.
+pub fn chmod(path: []const u8, mode: u16) Error!void {
+    const node = try resolve(path);
+    try applyChmod(node, mode);
+}
+
+/// Stamp the owner of a freshly created node and persist it.
+pub fn setOwner(node: *Node, uid: u32, gid: u32) void {
+    node.uid = uid;
+    node.gid = gid;
+    if (node.on_ext and node.ext_ino != 0) _ = ext4.chown(node.ext_ino, uid, gid);
+}
+
+/// Full mode word (file-type bits derived from kind + permission bits).
 pub fn getMode(node: *const Node) u16 {
-    if (node.on_ext and node.ext_ino != 0) return ext4.getMode(node.ext_ino);
-    return 0;
+    const t: u16 = switch (node.kind) {
+        .dir     => 0x4000,
+        .chardev => 0x2000,
+        .pipe    => 0x1000,
+        .file    => 0x8000,
+    };
+    return t | (node.mode & 0o7777);
 }
 
 // ---- synthetic-fs builders (procfs / sysfs) ---------------------------------

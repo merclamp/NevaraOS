@@ -264,6 +264,7 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
 
     const node = vfs.resolve(path) catch return -2; // -ENOENT
     if (node.kind != .file) return -2;
+    if (!vfs.mayAccess(node, p.euid, p.egid, vfs.X)) return -13; // -EACCES
 
     // Snapshot argv from the (still-current) address space.
     var tmp: [MAX_ARGS][ARG_LEN]u8 = undefined;

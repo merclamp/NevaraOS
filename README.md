@@ -66,10 +66,10 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
 - **50+ NevBox applets**: `echo` `cat` `ls` `wc` `grep` `head` `tail` `cp`
   `mv` `rm` `touch` `mkfile` `mkdir` `sort` `uniq` `cut` `tr` `rev` `pwd`
   `yes` `basename` `dirname` `seq` `tee` `true` `false` `sleep` `uptime`
-  `uname` `nevfetch` `chmod` `find` `stat` `strings` `fold` `comm` `printf`
+  `uname` `nevfetch` `chmod` `chown` `find` `stat` `strings` `fold` `comm` `printf`
   `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
   `whoami` `id` `su` `useradd` `userdel` `passwd`
-  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear` `kill` `sigtest`
+  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear` `kill` `sigtest` `dactest`
   — all in one multi-call binary, no libc.
 
 ## Current status
@@ -263,9 +263,16 @@ ZInit is now a real supervisor instead of a getty exec-loop:
 - ✅ **`/sys` stubs** — `/sys/kernel/{hostname,ostype,osrelease}` plus the
   conventional skeleton (`devices`, `class`, `block`, `bus`, `firmware`,
   `module`) for tools that probe the tree.
-- ⏳ **File-permission enforcement** — extend the kernel uid/gid model to
-  per-node owner uid/gid + mode bits; `open()` enforces DAC; `SYS_chown=92`,
-  `SYS_fchmod=91`.
+- ✅ **File-permission enforcement (DAC)** — every VFS node carries owner
+  uid/gid + permission bits, loaded from the ext4 inode and written back on
+  change (this also fixed a latent bug where `i_ctime` was written over `i_gid`).
+  `open()` enforces classic Unix rwx by owner/group/other class (root bypasses
+  read/write; execute still needs an x bit); `execve`/`spawn` require execute;
+  new files/dirs are owned by their creator. `SYS_chmod`/`SYS_fchmod=91` are
+  owner-or-root, `SYS_chown=92` is root-only; a compact `stat` syscall exposes
+  mode/uid/gid (NevBox `stat`, `chmod`, **`chown`**). Verified by the `dactest`
+  applet: 8/8 checks (root bypass, other-class deny, group/owner grants, write
+  protection, chmod-EPERM, exec-needs-x) all pass in QEMU.
 - ⏳ **Demand paging / CoW fork** — copy-on-write page fault handler; `fork()`
   no longer deep-copies all pages; only modified pages are duplicated.
 - ⏳ **mmap stub** — `SYS_mmap=9` for anonymous mappings (needed by musl and

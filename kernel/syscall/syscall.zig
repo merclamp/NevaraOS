@@ -48,6 +48,9 @@ const SYS_rename: usize = 82;
 const SYS_sleep:  usize = 1002;
 const SYS_rmdir:  usize = 84;
 const SYS_chmod:  usize = 90;
+const SYS_fchmod: usize = 91;
+const SYS_chown:  usize = 92;
+const SYS_statp:  usize = 1030; // stat(path, *NevStat) — Nevara-specific compact stat
 const SYS_getuid:  usize = 102;
 const SYS_getgid:  usize = 104;
 const SYS_setuid:  usize = 105;
@@ -82,6 +85,7 @@ const ENOENT: isize = 2;
 const ESRCH: isize = 3;
 const EBADF: isize = 9;
 const ECHILD: isize = 10;
+const EACCES: isize = 13;
 const ENOMEM: isize = 12;
 const EEXIST: isize = 17;
 const ENOTDIR: isize = 20;
@@ -207,12 +211,28 @@ fn sysRead(fd: usize, buf_ptr: usize, count: usize) isize {
 fn sysOpen(path_ptr: usize, flags: usize) isize {
     var pbuf: [512]u8 = undefined;
     const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    var created = false;
     const node = vfs.resolve(path) catch |e| blk: {
         if (e == error.NotFound and (flags & O_CREAT) != 0) {
-            break :blk vfs.create(path, .file) catch |ce| return errnoFor(ce);
+            const n = vfs.create(path, .file) catch |ce| return errnoFor(ce);
+            // A new file belongs to its creator.
+            const me = process.current();
+            vfs.setOwner(n, me.euid, me.egid);
+            created = true;
+            break :blk n;
         }
         return errnoFor(e);
     };
+    // DAC: an existing file must grant the requested access. A just-created file
+    // is implicitly accessible to its creator (POSIX skips the check on O_CREAT).
+    if (!created) {
+        const me = process.current();
+        var want: u8 = 0;
+        const acc = flags & 0o3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+        if (acc == 0 or acc == 2) want |= vfs.R;
+        if (acc == 1 or acc == 2) want |= vfs.W;
+        if (!vfs.mayAccess(node, me.euid, me.egid, want)) return -EACCES;
+    }
     if ((flags & O_TRUNC) != 0 and node.kind == .file) node.size = 0;
     const fd = allocFd() orelse return -EBADF;
     const start: usize = if ((flags & O_APPEND) != 0) node.size else 0;
@@ -286,7 +306,9 @@ fn sysLseek(fd: usize, offset: usize, whence: usize) isize {
 fn sysMkdir(path_ptr: usize) isize {
     var pbuf: [512]u8 = undefined;
     const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
-    _ = vfs.mkdir(path) catch |e| return errnoFor(e);
+    const node = vfs.mkdir(path) catch |e| return errnoFor(e);
+    const me = process.current();
+    vfs.setOwner(node, me.euid, me.egid);
     return 0;
 }
 
@@ -361,6 +383,8 @@ fn sysSpawn(path_ptr: usize, argv_ptr: usize) isize {
     const node = vfs.resolve(path) catch |e| return errnoFor(e);
 
     if (node.kind != .file) return -EINVAL;
+    const me = process.current();
+    if (!vfs.mayAccess(node, me.euid, me.egid, vfs.X)) return -EACCES;
     vfs.ensureLoaded(node);
     const image = node.data[0..node.size];
 
@@ -504,10 +528,52 @@ fn sysRmdir(path_ptr: usize) isize {
 }
 
 
+// Only the file's owner (or root) may change its mode / owner.
+fn ownsOrRoot(node: *const vfs.Node) bool {
+    const me = process.current();
+    return me.euid == 0 or me.euid == node.uid;
+}
+
 fn sysChmod(path_ptr: usize, mode: usize) isize {
     var pbuf: [512]u8 = undefined;
     const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
-    vfs.chmod(path, @intCast(mode & 0xFFF)) catch |e| return errnoFor(e);
+    const node = vfs.resolve(path) catch |e| return errnoFor(e);
+    if (!ownsOrRoot(node)) return -EPERM;
+    vfs.applyChmod(node, @intCast(mode & 0xFFF)) catch |e| return errnoFor(e);
+    return 0;
+}
+
+fn sysFchmod(fd: usize, mode: usize) isize {
+    const fds = fdTable();
+    if (fd >= process.MAX_FD or !fds[fd].used) return -EBADF;
+    const node = fds[fd].node;
+    if (!ownsOrRoot(node)) return -EPERM;
+    vfs.applyChmod(node, @intCast(mode & 0xFFF)) catch |e| return errnoFor(e);
+    return 0;
+}
+
+// chown(path, uid, gid): only root may change ownership (a uid/gid of (u32)-1
+// leaves that field unchanged).
+fn sysChown(path_ptr: usize, uid: usize, gid: usize) isize {
+    if (process.current().euid != 0) return -EPERM;
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    const node = vfs.resolve(path) catch |e| return errnoFor(e);
+    vfs.applyChown(node, @truncate(uid), @truncate(gid)) catch |e| return errnoFor(e);
+    return 0;
+}
+
+// stat(path, *NevStat): compact 16-byte stat — mode(u32) uid(u32) gid(u32) size(u32).
+fn sysStatp(path_ptr: usize, out_ptr: usize) isize {
+    var pbuf: [512]u8 = undefined;
+    const path = toAbsPath(cstr(path_ptr), &pbuf) orelse return -EINVAL;
+    const node = vfs.resolve(path) catch |e| return errnoFor(e);
+    if (out_ptr == 0) return -EINVAL;
+    const out: [*]u32 = @ptrFromInt(out_ptr);
+    out[0] = vfs.getMode(node);
+    out[1] = node.uid;
+    out[2] = node.gid;
+    out[3] = @intCast(node.size);
     return 0;
 }
 fn sysGetuid()  isize { return @intCast(process.current().uid); }
@@ -699,6 +765,9 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_sleep  => sysSleep(a1),
         SYS_rmdir  => sysRmdir(a1),
         SYS_chmod  => sysChmod(a1, a2),
+        SYS_fchmod => sysFchmod(a1, a2),
+        SYS_chown  => sysChown(a1, a2, a3),
+        SYS_statp  => sysStatp(a1, a2),
         SYS_getuid   => sysGetuid(),
         SYS_getgid   => sysGetgid(),
         SYS_geteuid  => sysGeteuid(),

@@ -108,15 +108,17 @@ pub fn main() void {
     else if (eq(cmd, "poweroff")) appletPoweroff()
     else if (eq(cmd, "kill"))     appletKill()
     else if (eq(cmd, "sigtest"))  appletSigtest()
+    else if (eq(cmd, "chown"))    appletChown()
+    else if (eq(cmd, "dactest"))  appletDactest()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
-                    "pwd yes basename dirname rm mv sleep chmod " ++
+                    "pwd yes basename dirname rm mv sleep chmod chown " ++
                     "find stat strings fold comm printf which xargs " ++
                     "ln env dd od nl du " ++
                     "whoami id su useradd userdel passwd " ++
                     "ping ifconfig clear zinit-ctl reboot poweroff " ++
-                    "kill sigtest\n");
+                    "kill sigtest dactest\n");
 
 }
 
@@ -1651,37 +1653,210 @@ fn appletFind() void {
 // stat <file...> — print inode number, size, and type from getdents of parent.
 // (We have no stat syscall, so we use a directory scan of the parent.)
 
+/// Print the low 12 bits of a mode word as 4 octal digits.
+fn printOctalMode(mode: u32) void {
+    var buf: [4]u8 = undefined;
+    var v = mode & 0o7777;
+    var i: usize = 4;
+    while (i > 0) {
+        i -= 1;
+        buf[i] = '0' + @as(u8, @intCast(v & 7));
+        v >>= 3;
+    }
+    nstd.print(&buf);
+}
+
+fn typeName(mode: u32) []const u8 {
+    return switch (mode & 0xF000) {
+        0x4000 => "directory",
+        0x2000 => "character device",
+        0x1000 => "fifo",
+        else   => "regular file",
+    };
+}
+
 fn appletStat() void {
     if (nstd.argc() < 2) { nstd.print("usage: stat <file...>\n"); return; }
     var i: usize = 1;
     while (nstd.argZ(i)) |path| : (i += 1) {
         const p = nstd.arg(i).?;
-        // Try opening as directory first to determine type.
-        const fd_raw = nstd.open(path, 0);
-        if (fd_raw < 0) {
-            nstd.print("stat: cannot open: "); nstd.print(p); nstd.print("\n");
+        var st: nstd.Stat = undefined;
+        if (nstd.stat(path, &st) < 0) {
+            nstd.print("stat: cannot stat: "); nstd.print(p); nstd.print("\n");
             continue;
         }
-        const fd: usize = @intCast(fd_raw);
-        // Try getdents to probe if it's a directory.
-        var probe: [64]u8 = undefined;
-        const gd = nstd.getdents64(fd, &probe);
-        const is_dir = gd > 0;
-        // Get size via lseek to end.
-        _ = nstd.lseek(fd, 0, 0);
-        const size = nstd.lseek(fd, 0, 2);
-        nstd.close(fd);
-
         nstd.print("  File: "); nstd.print(p); nstd.print("\n");
-        nstd.print("  Type: ");
-        if (is_dir) nstd.print("directory") else nstd.print("regular file");
+        nstd.print("  Type: "); nstd.print(typeName(st.mode)); nstd.print("\n");
+        nstd.print("  Size: "); nstd.printDec(st.size); nstd.print("\n");
+        nstd.print("  Mode: "); printOctalMode(st.mode);
+        nstd.print("   Uid: "); nstd.printDec(st.uid);
+        nstd.print("   Gid: "); nstd.printDec(st.gid);
         nstd.print("\n");
-        if (!is_dir) {
-            nstd.print("  Size: ");
-            nstd.printDec(if (size >= 0) @intCast(size) else 0);
+    }
+}
+
+// ---- chown -----------------------------------------------------------------
+// chown UID[:GID] FILE...   (root only)
+
+fn appletChown() void {
+    if (nstd.argc() < 3) { nstd.print("usage: chown UID[:GID] FILE...\n"); return; }
+    const spec = nstd.arg(1).?;
+    var uid: u32 = 0;
+    var gid: u32 = 0xFFFF_FFFF; // -1: leave group unchanged unless given
+    var j: usize = 0;
+    while (j < spec.len and spec[j] != ':') : (j += 1) {
+        if (spec[j] < '0' or spec[j] > '9') { nstd.print("chown: invalid uid\n"); return; }
+        uid = uid * 10 + (spec[j] - '0');
+    }
+    if (j < spec.len and spec[j] == ':') {
+        gid = 0;
+        var k = j + 1;
+        while (k < spec.len) : (k += 1) {
+            if (spec[k] < '0' or spec[k] > '9') { nstd.print("chown: invalid gid\n"); return; }
+            gid = gid * 10 + (spec[k] - '0');
+        }
+    }
+    var i: usize = 2;
+    while (nstd.argZ(i)) |path| : (i += 1) {
+        if (nstd.chown(path, uid, gid) < 0) {
+            nstd.print("chown: cannot change owner of ");
+            nstd.print(nstd.arg(i).?);
             nstd.print("\n");
         }
     }
+}
+
+// ---- dactest (discretionary access control smoke test) ---------------------
+//
+// Runs as root, then drops to uid 1000 in forked children to show that the
+// kernel enforces classic Unix rwx permissions on open()/execve() and that
+// chmod/chown are owner-or-root only. Each line ends in [PASS] or [FAIL].
+
+const O_RDONLY: usize = 0;
+const O_WRONLY: usize = 1;
+const O_RDWR: usize = 2;
+const O_CREAT_TRUNC_WR: usize = 0o100 | 0o1000 | O_WRONLY;
+
+fn checkOpen(label: []const u8, path: [*:0]const u8, flags: usize, want_ok: bool) void {
+    const fd = nstd.open(path, flags);
+    const ok = fd >= 0;
+    if (ok) nstd.close(@intCast(fd));
+    nstd.print(label);
+    nstd.print(if (ok) " -> ALLOWED" else " -> DENIED");
+    nstd.print(if (ok == want_ok) "  [PASS]\n" else "  [FAIL]\n");
+}
+
+fn statLine(path: [*:0]const u8) void {
+    var st: nstd.Stat = undefined;
+    if (nstd.stat(path, &st) < 0) { nstd.print("  (stat failed)\n"); return; }
+    nstd.print("  secret: mode="); printOctalMode(st.mode);
+    nstd.print(" uid="); nstd.printDec(st.uid);
+    nstd.print(" gid="); nstd.printDec(st.gid);
+    nstd.print("\n");
+}
+
+fn copyFile(src: [*:0]const u8, dst: [*:0]const u8) bool {
+    const sfd = nstd.open(src, O_RDONLY);
+    if (sfd < 0) return false;
+    const dfd = nstd.open(dst, O_CREAT_TRUNC_WR);
+    if (dfd < 0) { nstd.close(@intCast(sfd)); return false; }
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const n = nstd.read(@intCast(sfd), &buf);
+        if (n == 0 or n > buf.len) break;
+        _ = nstd.write(@intCast(dfd), buf[0..n]);
+    }
+    nstd.close(@intCast(sfd));
+    nstd.close(@intCast(dfd));
+    return true;
+}
+
+fn appletDactest() void {
+    const secret: [*:0]const u8 = "/tmp/dac_secret";
+    nstd.print("=== DAC TEST (root + dropped uid 1000) ===\n");
+
+    // Create as root, then lock down to rw-r----- (0640).
+    {
+        const fd = nstd.open(secret, O_CREAT_TRUNC_WR);
+        if (fd < 0) { nstd.print("dactest: cannot create secret\n"); return; }
+        _ = nstd.write(@intCast(fd), "topsecret\n");
+        nstd.close(@intCast(fd));
+    }
+    _ = nstd.chmodFile(secret, 0o640);
+    statLine(secret);
+
+    // [A] root bypasses DAC.
+    checkOpen("[A] root    read  0640", secret, O_RDONLY, true);
+
+    // [B] uid 1000 (other class, no r) is denied; and may not chmod a file it
+    //     does not own.
+    if (nstd.fork() == 0) {
+        _ = nstd.setgid(1000);
+        _ = nstd.setuid(1000);
+        checkOpen("[B] uid1000 read  0640", secret, O_RDONLY, false);
+        const cr = nstd.chmodFile(secret, 0o644);
+        nstd.print("[B] uid1000 chmod 0644");
+        nstd.print(if (cr < 0) " -> EPERM  [PASS]\n" else " -> OK  [FAIL]\n");
+        nstd.exit(0);
+    } else {
+        var st: u32 = 0;
+        _ = nstd.waitpid(-1, &st, 0);
+    }
+
+    // [C] grant other-read; uid 1000 may now read.
+    _ = nstd.chmodFile(secret, 0o644);
+    if (nstd.fork() == 0) {
+        _ = nstd.setgid(1000);
+        _ = nstd.setuid(1000);
+        checkOpen("[C] uid1000 read  0644", secret, O_RDONLY, true);
+        nstd.exit(0);
+    } else {
+        var st: u32 = 0;
+        _ = nstd.waitpid(-1, &st, 0);
+    }
+
+    // [D] read-only file: a write open is rejected for the non-owner.
+    _ = nstd.chmodFile(secret, 0o444);
+    if (nstd.fork() == 0) {
+        _ = nstd.setgid(1000);
+        _ = nstd.setuid(1000);
+        checkOpen("[D] uid1000 write 0444", secret, O_WRONLY, false);
+        nstd.exit(0);
+    } else {
+        var st: u32 = 0;
+        _ = nstd.waitpid(-1, &st, 0);
+    }
+
+    // [E] hand the file to uid 1000 (0600); now the owner may read+write it.
+    _ = nstd.chown(secret, 1000, 1000);
+    _ = nstd.chmodFile(secret, 0o600);
+    if (nstd.fork() == 0) {
+        _ = nstd.setgid(1000);
+        _ = nstd.setuid(1000);
+        checkOpen("[E] owner1000 rdwr 0600", secret, O_RDWR, true);
+        nstd.exit(0);
+    } else {
+        var st: u32 = 0;
+        _ = nstd.waitpid(-1, &st, 0);
+    }
+
+    // [F] execute needs an x bit — even for root. Copy a real binary, then flip
+    //     its x bits. argv[0]="true" keeps NevBox's multi-call dispatch silent.
+    if (copyFile("/bin/true", "/tmp/dac_prog")) {
+        const argv = [_]?[*:0]const u8{ "true", null };
+        _ = nstd.chmodFile("/tmp/dac_prog", 0o600); // no x
+        const r1 = nstd.spawn("/tmp/dac_prog", &argv);
+        nstd.print("[F] exec 0600 (no x)  ");
+        nstd.print(if (r1 < 0) " -> EACCES  [PASS]\n" else " -> ran  [FAIL]\n");
+        _ = nstd.chmodFile("/tmp/dac_prog", 0o755);
+        const r2 = nstd.spawn("/tmp/dac_prog", &argv);
+        nstd.print("[F] exec 0755         ");
+        nstd.print(if (r2 >= 0) " -> ran  [PASS]\n" else " -> EACCES  [FAIL]\n");
+        _ = nstd.unlinkFile("/tmp/dac_prog");
+    }
+
+    _ = nstd.unlinkFile(secret);
+    nstd.print("=== DAC TEST DONE ===\n");
 }
 
 // ---- strings ---------------------------------------------------------------
