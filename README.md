@@ -251,11 +251,18 @@ ZInit is now a real supervisor instead of a getty exec-loop:
   it). `kill` NevBox applet + `sigtest` self-test; nstd `kill`/`signal`/`raise`.
   Verified in QEMU: handler round-trip, default-terminate, and SIGSEGV-from-fault
   all produce the expected status words.
-- ⏳ **`/proc` virtual filesystem** — read-only entries: `/proc/self/pid`,
-  `/proc/self/maps`, `/proc/meminfo`, `/proc/uptime`, `/proc/version`,
-  `/proc/<pid>/status` for each live process.
-- ⏳ **`/sys` stubs** — minimal `/sys/block/sda`, `/sys/class/net/eth0`
-  (for tools that probe hardware via sysfs).
+- ✅ **`/proc` virtual filesystem** — a synthetic in-RAM tree whose files carry
+  no stored data: each read runs a generator over live kernel state. Globals:
+  `version`, `uptime`, `meminfo` (from the page allocator), `cpuinfo` (vendor +
+  brand via `CPUID`), `stat`, `loadavg`, `filesystems`, `mounts`, `cmdline`, and
+  `sys/kernel/{hostname,ostype,osrelease,version}`. **One directory per live
+  process** is enumerated on demand through a VFS synthetic-directory hook, so
+  `ls /proc` lists real PIDs and `cat /proc/<pid>/{status,stat,cmdline}` reads
+  the live process table; `/proc/self` resolves to the reading process. Verified
+  in QEMU.
+- ✅ **`/sys` stubs** — `/sys/kernel/{hostname,ostype,osrelease}` plus the
+  conventional skeleton (`devices`, `class`, `block`, `bus`, `firmware`,
+  `module`) for tools that probe the tree.
 - ⏳ **File-permission enforcement** — extend the kernel uid/gid model to
   per-node owner uid/gid + mode bits; `open()` enforces DAC; `SYS_chown=92`,
   `SYS_fchmod=91`.
@@ -469,7 +476,7 @@ kernel/
                      PS/2 keyboard, ATA PIO driver, PIT (jiffies counter)
   mm/                pmm, vmm, heap
   proc/              scheduler, kernel threads, and the process model (+ cwd)
-  fs/                VFS (tmpfs + /dev), ext4 read-write driver
+  fs/                VFS (tmpfs + /dev), ext4 read-write driver, procfs (/proc + /sys)
   syscall/           file descriptors, path resolution, and the syscall dispatcher
   exec/elf.zig       ELF64 loader
   lib/c.zig          freestanding mem builtins

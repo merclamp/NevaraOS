@@ -46,6 +46,14 @@ pub const DevOps = struct {
     write: *const fn (buf: []const u8) usize,
 };
 
+/// Hooks for a synthetic directory (e.g. /proc) whose children are produced on
+/// demand rather than stored in a static list. Consulted *after* the node's
+/// static children, so a synthetic dir may also carry fixed entries.
+pub const SynthDir = struct {
+    lookup:  *const fn (dir: *Node, name: []const u8) ?*Node,
+    readdir: *const fn (dir: *Node, index: usize) ?*Node,
+};
+
 pub const Node = struct {
     kind: Kind,
     name: []u8,
@@ -69,10 +77,23 @@ pub const Node = struct {
 
     // Anonymous pipe.
     pipe: ?*Pipe = null,
+
+    // Synthetic (procfs/sysfs) read-only file: `gen` produces the full content
+    // on demand. `gen_arg` carries an opaque parameter (e.g. a pid) to the
+    // generator so one function can back many per-object files.
+    gen: ?*const fn (node: *Node, out: []u8) usize = null,
+    gen_arg: u64 = 0,
+
+    // Synthetic directory hooks (e.g. /proc enumerating live PIDs).
+    synth: ?*const SynthDir = null,
 };
 
 var alloc: std.mem.Allocator = undefined;
 var root_node: *Node = undefined;
+
+// Scratch buffer for synthetic-file generation. Reused under cli; procfs
+// content is small (a few KiB at most).
+var gen_scratch: [4096]u8 = undefined;
 
 // ---- ext4 lazy-load ---------------------------------------------------------
 
@@ -171,6 +192,7 @@ pub fn lookup(dir: *Node, name: []const u8) ?*Node {
     for (dir.children[0..dir.child_count]) |c| {
         if (std.mem.eql(u8, c.name, name)) return c;
     }
+    if (dir.synth) |s| return s.lookup(dir, name);
     return null;
 }
 
@@ -315,6 +337,16 @@ pub fn readAt(node: *Node, buf: []u8, offset: usize) Error!usize {
             return n;
         },
         .file => {
+            // Synthetic (procfs/sysfs) file: regenerate full content, serve the
+            // requested window. Cheap because the content is small.
+            if (node.gen) |g| {
+                asm volatile ("cli");
+                const total = g(node, &gen_scratch);
+                const n = if (offset >= total) 0 else @min(buf.len, total - offset);
+                if (n > 0) @memcpy(buf[0..n], gen_scratch[offset .. offset + n]);
+                asm volatile ("sti");
+                return n;
+            }
             // Lazy-load ext4 data on first read.
             if (node.on_ext and node.data.len == 0 and node.size > 0) loadExt(node);
             if (offset >= node.size) return 0;
@@ -342,6 +374,7 @@ pub fn writeAt(node: *Node, buf: []const u8, offset: usize) Error!usize {
             return buf.len;
         },
         .file => {
+            if (node.gen != null) return Error.NotSupported; // procfs/sysfs are read-only
             const end = offset + buf.len;
 
             // Grow in-memory buffer.
@@ -369,8 +402,10 @@ pub fn writeAt(node: *Node, buf: []const u8, offset: usize) Error!usize {
 }
 
 pub fn readdir(dir: *Node, index: usize) ?*Node {
-    if (dir.kind != .dir or index >= dir.child_count) return null;
-    return dir.children[index];
+    if (dir.kind != .dir) return null;
+    if (index < dir.child_count) return dir.children[index];
+    if (dir.synth) |s| return s.readdir(dir, index - dir.child_count);
+    return null;
 }
 
 // ---- /dev devices -----------------------------------------------------------
@@ -417,6 +452,43 @@ pub fn chmod(path: []const u8, mode: u16) Error!void {
 pub fn getMode(node: *const Node) u16 {
     if (node.on_ext and node.ext_ino != 0) return ext4.getMode(node.ext_ino);
     return 0;
+}
+
+// ---- synthetic-fs builders (procfs / sysfs) ---------------------------------
+
+/// Allocate a bare node with a heap-duplicated name. Caller wires it up. Used
+/// by procfs to build its in-RAM tree (and pid pool) without touching ext4.
+pub fn newNode(kind: Kind, name: []const u8) Error!*Node {
+    return makeNode(kind, name);
+}
+
+/// Attach `child` to `dir`'s static children list.
+pub fn link(dir: *Node, child: *Node) Error!void {
+    return addChild(dir, child);
+}
+
+/// Create a pure in-RAM directory at `path` (never persisted to ext4).
+pub fn mkdirMem(path: []const u8) Error!*Node {
+    return createMem(path, .dir);
+}
+
+/// Create a synthetic read-only file at `path` whose content is produced by
+/// `genfn` on each read. Never persisted to ext4.
+pub fn mkgen(path: []const u8, genfn: *const fn (node: *Node, out: []u8) usize) Error!*Node {
+    const node = try createMem(path, .file);
+    node.gen = genfn;
+    return node;
+}
+
+fn createMem(path: []const u8, kind: Kind) Error!*Node {
+    const parts = splitParent(path);
+    if (parts.name.len == 0) return Error.Invalid;
+    const parent = try resolve(parts.parent);
+    if (parent.kind != .dir) return Error.NotDirectory;
+    if (lookup(parent, parts.name) != null) return Error.Exists;
+    const node = try makeNode(kind, parts.name);
+    try addChild(parent, node);
+    return node;
 }
 
 pub fn mkpipe() Error![2]*Node {

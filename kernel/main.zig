@@ -17,6 +17,7 @@ const net = @import("net/net.zig");
 const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
 const vfs = @import("fs/vfs.zig");
+const procfs = @import("fs/procfs.zig");
 const syscall = @import("syscall/syscall.zig");
 const usermode = @import("arch/x86_64/usermode.zig");
 const users_mod = @import("proc/users.zig");
@@ -95,6 +96,10 @@ export fn kmain(magic: u32, info: u32) callconv(.c) noreturn {
         if (!vfs.mountExt4AsRoot()) {
             console.writeString("[boot] WARNING: ext4 rootfs not found\n");
         }
+        procfs.init() catch {
+            console.writeString("[procfs] init failed\n");
+        };
+        console.writeString("[procfs] /proc + /sys mounted\n");
         users_mod.loadPasswd();
         usermode.init();
         process.init(); // scheduler + the kernel (kmain) process, stdio bound

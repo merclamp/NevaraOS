@@ -27,8 +27,8 @@ pub const File = struct {
 const State = enum { unused, running, zombie };
 const StartKind = enum { kernel, run_image, fork_resume };
 
-const MAX_PROC = 64;
-const MAX_ARGS = 16;
+pub const MAX_PROC = 64;
+pub const MAX_ARGS = 16;
 const ARG_LEN = 128;
 
 pub const Process = struct {
@@ -80,6 +80,28 @@ pub fn byPid(pid: u32) ?*Process {
         if (p.state != .unused and p.pid == pid) return p;
     }
     return null;
+}
+
+// ---- read-only views for procfs --------------------------------------------
+
+/// The process-table slot at `i` (whether or not it is in use).
+pub fn slot(i: usize) *Process { return &procs[i]; }
+
+/// True if the slot holds a live (running or zombie) process.
+pub fn isLive(p: *const Process) bool { return p.state != .unused; }
+
+/// Single-letter process state, Linux /proc/<pid>/stat style.
+pub fn stateChar(p: *const Process) u8 {
+    return switch (p.state) {
+        .running => 'R',
+        .zombie  => 'Z',
+        .unused  => 'X',
+    };
+}
+
+/// The argv vector as slices (valid while the process lives).
+pub fn argvSlices(p: *Process, out: *[MAX_ARGS][]const u8) []const []const u8 {
+    return argSlices(p, out);
 }
 
 /// The process bound to the running kernel thread.
@@ -286,6 +308,7 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
     var buf: [MAX_ARGS][]const u8 = undefined;
     var i: usize = 0;
     while (i < n) : (i += 1) buf[i] = tmp[i][0..tlen[i]];
+    copyArgs(p, buf[0..n]); // record argv for /proc/<pid>/{status,cmdline}
     const sp = usermode.buildUserStack(buf[0..n]) orelse exit(127);
 
     usermode.enter_user(entry, sp);
