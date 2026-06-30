@@ -26,7 +26,10 @@ const SYS_write: usize = 1;
 const SYS_open: usize = 2;
 const SYS_close: usize = 3;
 const SYS_lseek: usize = 8;
+const SYS_mmap: usize = 9;
+const SYS_munmap: usize = 11;
 const SYS_brk: usize = 12;
+const SYS_meminfo: usize = 1031; // meminfo() -> free bytes (Nevara-specific)
 const SYS_getpid: usize = 39;
 const SYS_fork: usize = 57;
 const SYS_execve: usize = 59;
@@ -373,6 +376,70 @@ fn sysBrk(addr: usize) isize {
     }
     p.brk = addr;
     return @intCast(addr);
+}
+
+// ---- mmap / munmap ----------------------------------------------------------
+
+const MMAP_BASE: usize = 0x5000_0000_0000; // user mmap arena, clear of brk+stack
+const MAP_ANONYMOUS: usize = 0x20;
+
+/// Tear down `pages` mappings starting at the page-aligned `base`, freeing the
+/// backing frames (refcount-aware). Used for munmap and mmap OOM unwinding.
+fn unmapRange(base: usize, pages: usize) void {
+    var v = base;
+    var k: usize = 0;
+    while (k < pages) : (k += 1) {
+        if (vmm.walk(v)) |ph| {
+            vmm.unmap(v);
+            pmm.free(ph & ~@as(usize, 0xFFF));
+        }
+        v += 0x1000;
+    }
+}
+
+/// mmap(addr, length, prot, flags, fd, offset): anonymous private mappings only.
+/// Ignores the addr hint and bump-allocates from the per-process mmap arena;
+/// pages are zero-filled and writable. Returns the base address or -errno.
+fn sysMmap(addr: usize, length: usize, prot: usize, flags: usize, fd: usize, offset: usize) isize {
+    _ = addr;
+    _ = prot;
+    _ = fd;
+    _ = offset;
+    if (length == 0) return -EINVAL;
+    if ((flags & MAP_ANONYMOUS) == 0) return -EINVAL; // file-backed mmap unsupported
+    const p = process.current();
+    if (p.mmap_top == 0) p.mmap_top = MMAP_BASE;
+    const pages = (length + 0xFFF) / 0x1000;
+    const base = p.mmap_top;
+    const mflags = vmm.PRESENT | vmm.WRITABLE | vmm.USER;
+    var v = base;
+    var k: usize = 0;
+    while (k < pages) : (k += 1) {
+        const frame = pmm.alloc() orelse {
+            unmapRange(base, k);
+            return -ENOMEM;
+        };
+        if (!vmm.map(v, frame, mflags)) {
+            pmm.free(frame);
+            unmapRange(base, k);
+            return -ENOMEM;
+        }
+        @memset(@as([*]u8, @ptrFromInt(v))[0..0x1000], 0);
+        v += 0x1000;
+    }
+    p.mmap_top = base + pages * 0x1000;
+    return @intCast(base);
+}
+
+fn sysMunmap(addr: usize, length: usize) isize {
+    if (length == 0) return -EINVAL;
+    const pages = (length + 0xFFF) / 0x1000;
+    unmapRange(addr & ~@as(usize, 0xFFF), pages);
+    return 0;
+}
+
+fn sysMeminfo() isize {
+    return @intCast(pmm.freeFrames() * pmm.PAGE_SIZE);
 }
 
 /// spawn(path, argv): convenience for a blocking run — create a child process
@@ -739,6 +806,9 @@ pub fn handle(tf: *usermode.TrapFrame) isize {
         SYS_close => sysClose(a1),
         SYS_lseek => sysLseek(a1, a2, a3),
         SYS_brk => sysBrk(a1),
+        SYS_mmap => sysMmap(a1, a2, a3, tf.r10, tf.r8, tf.r9),
+        SYS_munmap => sysMunmap(a1, a2),
+        SYS_meminfo => sysMeminfo(),
         SYS_getpid => @intCast(process.current().pid),
         SYS_fork => process.fork(tf),
         SYS_execve => blk: {

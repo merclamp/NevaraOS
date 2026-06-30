@@ -110,6 +110,7 @@ pub fn main() void {
     else if (eq(cmd, "sigtest"))  appletSigtest()
     else if (eq(cmd, "chown"))    appletChown()
     else if (eq(cmd, "dactest"))  appletDactest()
+    else if (eq(cmd, "vmtest"))   appletVmtest()
     else nstd.print("nevbox: applets: echo cat ls mkfile mkdir " ++
                     "wc grep head tail cp touch seq tee true false " ++
                     "uptime uname nevfetch sort uniq cut tr rev " ++
@@ -118,7 +119,7 @@ pub fn main() void {
                     "ln env dd od nl du " ++
                     "whoami id su useradd userdel passwd " ++
                     "ping ifconfig clear zinit-ctl reboot poweroff " ++
-                    "kill sigtest dactest\n");
+                    "kill sigtest dactest vmtest\n");
 
 }
 
@@ -1857,6 +1858,76 @@ fn appletDactest() void {
 
     _ = nstd.unlinkFile(secret);
     nstd.print("=== DAC TEST DONE ===\n");
+}
+
+// ---- vmtest (mmap + copy-on-write fork smoke test) -------------------------
+//
+// mmaps an anonymous region, exercises it, then forks. CoW is shown two ways:
+// correctness (the child's writes don't disturb the parent's copy) and laziness
+// (free memory barely moves at fork time, then drops once the child rewrites
+// every page).
+
+fn passFail(ok: bool) void {
+    nstd.print(if (ok) "  [PASS]\n" else "  [FAIL]\n");
+}
+
+fn appletVmtest() void {
+    nstd.print("=== VM TEST (mmap + copy-on-write fork) ===\n");
+    const PAGES: usize = 64;
+    const len = PAGES * 4096; // 256 KiB
+    const r = nstd.mmap(0, len, nstd.PROT_READ | nstd.PROT_WRITE,
+        nstd.MAP_PRIVATE | nstd.MAP_ANONYMOUS, -1, 0);
+    if (r < 0) { nstd.print("[mmap] FAILED\n"); return; }
+    const buf: [*]u8 = @ptrFromInt(@as(usize, @intCast(r)));
+
+    // Read/write sanity across the whole region.
+    buf[0] = 0x41;
+    buf[len - 1] = 0x42;
+    nstd.print("[mmap] 256KiB anon rw");
+    passFail(buf[0] == 0x41 and buf[len - 1] == 0x42);
+
+    // Fault every page in so the parent fully owns the region.
+    var i: usize = 0;
+    while (i < PAGES) : (i += 1) buf[i * 4096] = 7;
+
+    const marker: *u32 = @ptrCast(@alignCast(buf));
+    marker.* = 1111;
+
+    const free_before = nstd.memfree();
+    nstd.print("[mem] free before fork (KiB): ");
+    nstd.printDec(free_before / 1024);
+    nstd.print("\n");
+
+    const pid = nstd.fork();
+    if (pid == 0) {
+        // Right after fork, before writing: CoW means free memory is ~unchanged.
+        const free_after_fork = nstd.memfree();
+        const inherited = marker.*; // sees the parent's 1111 (shared, read-only)
+        marker.* = 2222; // first write → copies just this page
+        var k: usize = 0;
+        while (k < PAGES) : (k += 1) buf[k * 4096] = 9; // copy every page
+        const free_after_touch = nstd.memfree();
+        nstd.print("[cow] child inherited marker = ");
+        nstd.printDec(inherited);
+        passFail(inherited == 1111);
+        nstd.print("[mem] free after fork  (KiB): ");
+        nstd.printDec(free_after_fork / 1024);
+        nstd.print("  <- close to before (lazy)\n");
+        nstd.print("[mem] free after touch (KiB): ");
+        nstd.printDec(free_after_touch / 1024);
+        nstd.print("  <- ~256K lower (copied)\n");
+        nstd.exit(0);
+    } else {
+        var st: u32 = 0;
+        _ = nstd.waitpid(-1, &st, 0);
+        // The child set its copy to 2222; the parent's must still read 1111.
+        nstd.print("[cow] parent marker still ");
+        nstd.printDec(marker.*);
+        passFail(marker.* == 1111);
+    }
+
+    _ = nstd.munmap(@as(usize, @intCast(r)), len);
+    nstd.print("=== VM TEST DONE ===\n");
 }
 
 // ---- strings ---------------------------------------------------------------

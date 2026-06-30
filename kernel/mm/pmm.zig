@@ -19,6 +19,13 @@ var total_frames: usize = 0;
 var used_frames: usize = 0;
 var next_hint: usize = 0;
 
+// Per-frame reference count for shared frames (copy-on-write). The value is the
+// number of *extra* owners beyond the first, so a freshly allocated frame has
+// refcount 0 (one owner) and existing free() callers need no change: free()
+// only releases the frame to the bitmap once the last extra reference is gone.
+var refcount: [*]u16 = undefined;
+var refcount_len: usize = 0; // bytes
+
 inline fn alignUp(value: usize, a: usize) usize {
     return (value + a - 1) & ~(a - 1);
 }
@@ -84,10 +91,17 @@ pub fn init(info_addr: usize) void {
     bitmap = @ptrFromInt(bitmap_start);
     bitmap_len = alignUp((total_frames + 7) / 8, PAGE_SIZE);
 
-    // 3. Everything used by default.
+    // The refcount table lives immediately after the bitmap.
+    const refcount_start = bitmap_start + bitmap_len;
+    refcount = @ptrFromInt(refcount_start);
+    refcount_len = alignUp(total_frames * @sizeOf(u16), PAGE_SIZE);
+
+    // 3. Everything used by default; refcounts start at zero.
     var i: usize = 0;
     while (i < bitmap_len) : (i += 1) bitmap[i] = 0xFF;
     used_frames = total_frames;
+    i = 0;
+    while (i < total_frames) : (i += 1) refcount[i] = 0;
 
     // 4. Free the available regions reported by the bootloader.
     it = mb2.memoryMap(info_addr).?;
@@ -102,7 +116,14 @@ pub fn init(info_addr: usize) void {
     reserveRange(0, 0x100000); // low 1 MiB (BIOS/IVT/EBDA)
     reserveRange(0x100000, kend); // the kernel image
     reserveRange(bitmap_start, bitmap_start + bitmap_len); // the bitmap itself
+    reserveRange(refcount_start, refcount_start + refcount_len); // the refcount table
     reserveRange(info_addr, info_end); // the Multiboot2 info
+
+    // Reserve any GRUB-loaded module (the ext4 rootfs ramdisk). Its file data is
+    // read lazily long after boot, so these frames must never be handed out.
+    if (mb2.findModule(info_addr)) |mod| {
+        reserveRange(mod.start, mod.end);
+    }
 
     next_hint = 0;
 
@@ -125,6 +146,7 @@ pub fn alloc() ?usize {
         if (f >= total_frames) f = 0;
         if (!testFrame(f)) {
             markUsed(f);
+            refcount[f] = 0;
             next_hint = f + 1;
             return f * PAGE_SIZE;
         }
@@ -133,11 +155,31 @@ pub fn alloc() ?usize {
     return null;
 }
 
-/// Free a previously allocated physical frame.
+/// Free a previously allocated physical frame. If the frame is shared (extra
+/// references exist from copy-on-write), this just drops one reference and the
+/// frame stays allocated for the remaining owners.
 pub fn free(phys: usize) void {
     const frame = phys / PAGE_SIZE;
+    if (frame >= total_frames) return;
+    if (refcount[frame] > 0) {
+        refcount[frame] -= 1;
+        return;
+    }
     markFree(frame);
     if (frame < next_hint) next_hint = frame;
+}
+
+/// Add a reference to a frame so it survives the next free() (copy-on-write
+/// sharing between a forked parent and child).
+pub fn incRef(phys: usize) void {
+    const frame = phys / PAGE_SIZE;
+    if (frame < total_frames) refcount[frame] += 1;
+}
+
+/// Number of *extra* references on a frame (0 means a single owner).
+pub fn refCount(phys: usize) u16 {
+    const frame = phys / PAGE_SIZE;
+    return if (frame < total_frames) refcount[frame] else 0;
 }
 
 /// Allocate `n_pages` contiguous physical frames all below 4 GiB (DMA-safe).

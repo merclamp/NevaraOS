@@ -39,6 +39,8 @@ pub const Process = struct {
     thread: ?*sched.Thread = null,
     exit_code: i32 = 0,
     brk: usize = 0,
+    // Bump pointer for anonymous mmap() regions (0 = not yet initialized).
+    mmap_top: usize = 0,
     fds: [MAX_FD]File = .{File{}} ** MAX_FD,
 
     // Current working directory (absolute path, kernel-owned buffer).
@@ -224,6 +226,7 @@ pub fn fork(tf: *const usermode.TrapFrame) isize {
         .state = .running,
         .cr3 = cr3,
         .brk = parent.brk,
+        .mmap_top = parent.mmap_top, // inherited regions are cloned copy-on-write
         .fds = parent.fds,
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
@@ -298,6 +301,7 @@ pub fn exec(path: []const u8, argv_ptr: usize) isize {
     p.cr3 = new_cr3;
     if (p.thread) |t| t.cr3 = new_cr3;
     p.brk = 0;
+    p.mmap_top = 0; // fresh address space — no mmap regions yet
     // execve resets caught signals to default and forgets the old restorer.
     p.sig_handlers = [_]u64{0} ** 32;
     p.sig_restorer = 0;

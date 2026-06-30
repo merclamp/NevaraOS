@@ -12,7 +12,10 @@ const SYS_write: usize = 1;
 const SYS_open: usize = 2;
 const SYS_close: usize = 3;
 const SYS_lseek: usize = 8;
+const SYS_mmap: usize = 9;
+const SYS_munmap: usize = 11;
 const SYS_brk: usize = 12;
+const SYS_meminfo: usize = 1031;
 const SYS_getpid: usize = 39;
 const SYS_getdents64: usize = 217;
 const SYS_spawn: usize = 1000;
@@ -78,6 +81,19 @@ inline fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) usize {
         : .{ .rcx = true, .r11 = true, .memory = true });
 }
 
+inline fn syscall6(n: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) usize {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (n),
+          [a1] "{rdi}" (a1),
+          [a2] "{rsi}" (a2),
+          [a3] "{rdx}" (a3),
+          [a4] "{r10}" (a4),
+          [a5] "{r8}" (a5),
+          [a6] "{r9}" (a6),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+}
+
 // ---- Raw syscall wrappers ---------------------------------------------------
 
 pub fn write(fd: usize, buf: []const u8) usize {
@@ -94,6 +110,28 @@ pub fn open(path: [*:0]const u8, flags: usize) isize {
 
 pub fn close(fd: usize) void {
     _ = syscall1(SYS_close, fd);
+}
+
+// mmap() prot/flags constants.
+pub const PROT_READ: usize = 1;
+pub const PROT_WRITE: usize = 2;
+pub const MAP_PRIVATE: usize = 2;
+pub const MAP_ANONYMOUS: usize = 0x20;
+
+/// mmap(): create an anonymous private mapping of `length` bytes. Returns the
+/// base address (as isize) or a negative errno. `addr` is a hint (ignored).
+pub fn mmap(addr: usize, length: usize, prot: usize, flags: usize, fd: isize, offset: usize) isize {
+    return @bitCast(syscall6(SYS_mmap, addr, length, prot, flags, @bitCast(fd), offset));
+}
+
+/// munmap(): remove a mapping created by mmap(). Returns 0 or negative errno.
+pub fn munmap(addr: usize, length: usize) isize {
+    return @bitCast(syscall3(SYS_munmap, addr, length, 0));
+}
+
+/// memfree(): free physical memory in bytes (Nevara-specific; for vmtest).
+pub fn memfree() usize {
+    return syscall1(SYS_meminfo, 0);
 }
 
 /// lseek(): reposition a file-descriptor offset.

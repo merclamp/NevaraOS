@@ -21,6 +21,10 @@ pub const NO_CACHE: u64 = 1 << 4;
 pub const HUGE: u64 = 1 << 7;
 pub const NO_EXECUTE: u64 = 1 << 63;
 
+// Software-available PTE bit (ignored by the CPU) marking a copy-on-write page:
+// the page is mapped read-only and shared until someone writes to it.
+pub const COW: u64 = 1 << 9;
+
 /// Physical address bits of a page-table entry.
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -154,52 +158,86 @@ pub fn kernelCr3() usize {
     return kernel_pml4;
 }
 
-/// Recursively deep-copy a page-table subtree, allocating fresh frames and
-/// copying leaf page contents. `depth` is the number of levels below this table
-/// (3 = PDPT, 2 = PD, 1 = PT). Returns the new table's physical address.
-fn cloneTable(table_phys: usize, depth: u32) ?usize {
+/// Recursively clone a page-table subtree for copy-on-write fork. Intermediate
+/// tables are copied into fresh frames (each process needs its own hierarchy so
+/// later COW edits don't leak across), but leaf *data* frames are shared: the
+/// page is made read-only and COW-marked in BOTH parent and child, and its
+/// reference count is bumped. `depth`: 3 = PDPT, 2 = PD, 1 = PT.
+fn cowCloneTable(table_phys: usize, depth: u32) ?usize {
     const new_frame = pmm.alloc() orelse return null;
     const dst = tableEntries(new_frame);
     const src = tableEntries(table_phys);
+    for (dst) |*x| x.* = 0; // safe to walk on a mid-clone OOM unwind
     for (0..512) |i| {
         const e = src[i];
-        if (e & PRESENT == 0) {
-            dst[i] = 0;
-            continue;
-        }
+        if (e & PRESENT == 0) continue;
         if (depth == 1) {
-            const page = pmm.alloc() orelse return null;
-            const s: [*]const u8 = @ptrFromInt(e & ADDR_MASK);
-            const d: [*]u8 = @ptrFromInt(page);
-            @memcpy(d[0..PAGE_SIZE], s[0..PAGE_SIZE]);
-            dst[i] = page | (e & ~ADDR_MASK);
+            const phys = e & ADDR_MASK;
+            if ((e & USER) != 0 and (e & WRITABLE) != 0) {
+                // Make it copy-on-write in both address spaces.
+                const ro = (e & ~WRITABLE) | COW;
+                src[i] = ro; // patch the parent in place
+                dst[i] = ro;
+            } else {
+                dst[i] = e; // read-only or kernel page: share verbatim
+            }
+            pmm.incRef(phys);
         } else if (e & HUGE != 0) {
             dst[i] = e; // huge page (kernel only; never in user space)
         } else {
-            const child = cloneTable(e & ADDR_MASK, depth - 1) orelse return null;
+            const child = cowCloneTable(e & ADDR_MASK, depth - 1) orelse return null;
             dst[i] = child | (e & ~ADDR_MASK);
         }
     }
     return new_frame;
 }
 
-/// Create a child address space that is a deep copy of `parent_pml4`'s user
-/// mappings while sharing the kernel half (PML4[0]). Used by fork().
+/// Create a child address space sharing `parent_pml4`'s user pages copy-on-write
+/// (and the kernel half, PML4[0]). Used by fork(). The parent's writable user
+/// pages are demoted to read-only here, so we flush its TLB before returning.
 pub fn forkAddressSpace(parent_pml4: usize) ?usize {
     const new_frame = pmm.alloc() orelse return null;
     const dst = tableEntries(new_frame);
     const par = tableEntries(parent_pml4);
     const kern = tableEntries(kernel_pml4);
+    for (dst) |*x| x.* = 0;
     for (0..512) |i| {
         const e = par[i];
         if (i == 0 or (e & PRESENT) == 0) {
             dst[i] = kern[i]; // share the kernel half (and leave empty slots)
         } else {
-            const child = cloneTable(e & ADDR_MASK, 3) orelse return null;
+            const child = cowCloneTable(e & ADDR_MASK, 3) orelse return null;
             dst[i] = child | (e & ~ADDR_MASK);
         }
     }
+    switchTo(readCr3()); // we run on the parent's CR3 — flush its now-RO pages
     return new_frame;
+}
+
+/// Resolve a copy-on-write write fault at `virt` in the current address space.
+/// Returns true if it was a COW page and is now writable (retry the access);
+/// false if `virt` is not a COW page (a genuine protection fault).
+pub fn handleCow(virt: usize) bool {
+    const pt = ptOf(virt) orelse return false;
+    const i = index(virt, 0);
+    const e = pt[i];
+    if (e & PRESENT == 0 or e & COW == 0) return false;
+    const old_phys = e & ADDR_MASK;
+    if (pmm.refCount(old_phys) == 0) {
+        // Sole remaining owner: reclaim the frame writable, no copy needed.
+        pt[i] = (e & ~COW) | WRITABLE;
+        invlpg(virt);
+        return true;
+    }
+    // Shared: copy into a private frame and drop our reference to the old one.
+    const new_frame = pmm.alloc() orelse return false;
+    const src: [*]const u8 = @ptrFromInt(old_phys);
+    const dst: [*]u8 = @ptrFromInt(new_frame);
+    @memcpy(dst[0..PAGE_SIZE], src[0..PAGE_SIZE]);
+    pmm.free(old_phys);
+    pt[i] = (new_frame & ADDR_MASK) | ((e & ~ADDR_MASK) & ~COW) | WRITABLE;
+    invlpg(virt);
+    return true;
 }
 
 fn freeTable(table_phys: usize, depth: u32) void {

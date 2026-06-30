@@ -244,7 +244,7 @@ pub fn build(b: *std.Build) void {
         \\           find stat strings fold comm printf which xargs ln env dd od nl du \
         \\           whoami id su useradd userdel passwd chown \
         \\           ping ifconfig clear zinit-ctl reboot poweroff \
-        \\           kill sigtest dactest; do
+        \\           kill sigtest dactest vmtest; do
         \\    cp "$NEVBOX" "$ROOTFS/bin/$APP"
         \\done
         \\chmod 0755 "$ROOTFS/bin/"*

@@ -12,6 +12,7 @@ const kbd = @import("kbd.zig");
 const pit = @import("pit.zig");
 const rtl8139 = @import("../../net/rtl8139.zig");
 const process = @import("../../proc/process.zig");
+const vmm = @import("../../mm/vmm.zig");
 
 
 /// 64-bit IDT gate descriptor (16 bytes).
@@ -139,6 +140,17 @@ export fn isrHandler(frame: *InterruptFrame) callconv(.c) void {
         pic.sendEOI(irq);
         if (irq == 0) { pit.tick(); sched.preempt(); } // timer: tick + preempt
         return;
+    }
+
+    // Page fault (#PF). A write to a present, copy-on-write page (whether from
+    // ring 3 or from the kernel touching a user buffer) is resolved by copying
+    // the page; the faulting instruction then retries. error_code bit0=present,
+    // bit1=write.
+    if (vec == 14) {
+        const cr2 = asm volatile ("mov %%cr2, %[r]"
+            : [r] "=r" (-> usize),
+        );
+        if ((frame.error_code & 0b11) == 0b11 and vmm.handleCow(cr2)) return;
     }
 
     // Breakpoint (#BP) is recoverable: report and resume.

@@ -69,7 +69,7 @@ Licensed under the **MIT license** — chosen so Nevara can be a foundation for
   `uname` `nevfetch` `chmod` `chown` `find` `stat` `strings` `fold` `comm` `printf`
   `which` `xargs` `ln` `env` `dd` `od` `nl` `du`
   `whoami` `id` `su` `useradd` `userdel` `passwd`
-  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear` `kill` `sigtest` `dactest`
+  `ping` `ifconfig` `zinit-ctl` `reboot` `poweroff` `clear` `kill` `sigtest` `dactest` `vmtest`
   — all in one multi-call binary, no libc.
 
 ## Current status
@@ -273,10 +273,21 @@ ZInit is now a real supervisor instead of a getty exec-loop:
   mode/uid/gid (NevBox `stat`, `chmod`, **`chown`**). Verified by the `dactest`
   applet: 8/8 checks (root bypass, other-class deny, group/owner grants, write
   protection, chmod-EPERM, exec-needs-x) all pass in QEMU.
-- ⏳ **Demand paging / CoW fork** — copy-on-write page fault handler; `fork()`
-  no longer deep-copies all pages; only modified pages are duplicated.
-- ⏳ **mmap stub** — `SYS_mmap=9` for anonymous mappings (needed by musl and
-  many programs); backed by VMM page allocation.
+- ✅ **Copy-on-write fork** — `fork()` no longer deep-copies user pages. Parent
+  and child share every writable page read-only (marked with a software COW bit
+  in the PTE) and the frame's reference count is bumped; the first write in
+  either process takes a page fault that copies just that page (or, if it is the
+  sole remaining owner, simply re-grants write). Handled for faults from ring 3
+  **and** from the kernel touching a user buffer. Backed by per-frame
+  refcounting in the PMM. This also surfaced and fixed a latent bug: the GRUB
+  rootfs ramdisk module was never reserved, so a large allocation burst could
+  overwrite it.
+- ✅ **mmap / munmap** — `SYS_mmap=9` for anonymous private mappings (zero-filled,
+  bump-allocated from a per-process arena at `0x5000_0000_0000`) and
+  `SYS_munmap=11`; mmap'd regions participate in copy-on-write across `fork`.
+  Demonstrated by the `vmtest` applet, which shows both CoW correctness (a
+  child's writes leave the parent's copy intact) and laziness (free memory barely
+  moves at fork, then drops by the working-set size as pages are rewritten).
 
 #### II-F · Network server stack
 
@@ -403,10 +414,13 @@ serial port (COM1) for debugging.
 **Memory management.**
 
 - *Physical (PMM):* a bitmap frame allocator built from the Multiboot2 memory
-  map; 4 KiB frames; reserves low memory, the kernel image, the bitmap, and the
-  boot info.
+  map; 4 KiB frames; reserves low memory, the kernel image, the bitmap, the
+  refcount table, the boot info, and the rootfs ramdisk module. Per-frame
+  reference counting lets frames be shared (copy-on-write).
 - *Virtual (VMM):* 4-level paging; maps/unmaps 4 KiB pages, allocating
   intermediate tables from the PMM; address translation honors 2 MiB huge pages.
+  Copy-on-write fork shares pages read-only and duplicates them lazily on the
+  write fault; `mmap`/`munmap` back anonymous mappings.
 - *Heap:* a first-fit free-list allocator exposed as `std.mem.Allocator`, backed
   by on-demand page mappings; supports splitting, coalescing, and arbitrary
   alignment.
@@ -458,8 +472,8 @@ echoed through the escape sequences the framebuffer terminal understands.
 **Userspace & multitasking.** Ring 3 is entered via `iretq`; user programs trap
 in with the `syscall` instruction, which saves a full trap frame and returns the
 same way. An ELF64 loader maps static executables into per-process address
-spaces. The process syscalls are real: `fork` deep-copies the caller's user
-pages, `execve` swaps in a new image, `wait4`/`waitpid` reap a zombie child,
+spaces. The process syscalls are real: `fork` shares the caller's user pages
+copy-on-write, `execve` swaps in a new image, `wait4`/`waitpid` reap a zombie child,
 and `exit` turns a process into a zombie until its parent reaps it. Userland is
 built on two Zig runtimes — **nstd** (native, libc-free) and **ZLibc** (a C
 library written in Zig, compiled by `zig cc`): `ctype.h` (12 classification and
